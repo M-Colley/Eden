@@ -251,8 +251,8 @@ def kernel_update_vgeoms(dyn_state: DynState, dyn_info: DynInfo, rigid_config: q
 
     Genesis places the visual geoms within its forward kinematics since
     https://github.com/Genesis-Embodied-AI/genesis-world/pull/3831, and its visualizer no longer asks a solver to
-    refresh them before drawing. The step kernels of the MochiSolver run their own kinematics, which place the geoms
-    alone, so the solver places the visual geoms once its substep is over.
+    refresh them before drawing. The single-kernel steps of the MochiSolver run their own kinematics, which place the
+    geoms alone, so the solver places the visual geoms after them (see `MochiSolver._update_vgeoms`).
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g, i_b in qd.ndrange(*dyn_state.vgeoms.pos.shape, axes=qd.static(eoa(dyn_state.vgeoms.pos))):

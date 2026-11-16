@@ -27,7 +27,6 @@ import eden as en
 from eden.entities.base import Entity
 from eden.entities.rigid import RigidEntity
 from eden.utils.assets import get_asset_path
-
 from eden.utils.misc import assert_unbuilt
 
 if TYPE_CHECKING:

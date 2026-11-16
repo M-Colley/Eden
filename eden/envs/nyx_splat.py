@@ -23,7 +23,6 @@ from eden.options import (
     SensorsOptions,
 )
 from eden.options.splat import NyxSplatOptions
-
 from eden.utils.misc import assert_unbuilt
 
 if TYPE_CHECKING:

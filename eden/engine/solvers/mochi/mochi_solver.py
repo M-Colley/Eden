@@ -323,7 +323,10 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     _entity_classes = ((Morph, MochiEntity),)
     # Its state includes the deformable vertices, the integration history and the contact state, which its `data`
     # leaves out (see `data` below): `Simulator.get_state` and `Simulator.reset` skip it, and the hosting saves and
-    # restores it through `get_state` and `set_state` instead.
+    # restores it through `get_state` and `set_state` instead. Known debt: once the Mochi structs (`data.py`) are
+    # `genesis.utils.data.Data` with declared kinds, `data` can list them and this becomes True, which retires the
+    # hosting's `_bind_state`, `MochiSolverState`, `destroy` below and the kinematic-state kernels of `kinematics.py`,
+    # and lets a Mochi scene be checkpointed and recorded.
     is_checkpointable = False
 
     def __init__(self, sim: "Simulator", options: MochiOptions) -> None:
@@ -1840,6 +1843,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self._max_samples_per_soft_entity,
                 self._errno,
             )
+            self._update_vgeoms()
             self._is_forward_pos_updated = True
             self._is_forward_vel_updated = True
             self._is_contacts_recorded = False
@@ -1876,6 +1880,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self._max_samples_per_soft_entity,
                 self._errno,
             )
+            self._update_vgeoms()
             self._is_forward_pos_updated = True
             self._is_forward_vel_updated = True
             self._is_contacts_recorded = False
@@ -2352,13 +2357,18 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.mochi_info, self.mochi_state, self.island_state, self.rigid_config, True, self._errno
             )
 
-    def substep_post_coupling(self):
-        if not self.is_active:
-            return
-        if self.n_dofs > 0:
-            kernel_record_dofs_control_force(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+    def _update_vgeoms(self):
+        """Place the visual geoms on the links a single-kernel step left, which ran its own kinematics.
+
+        Genesis places them within its forward kinematics (`kernel_forward_kinematics`), which the pipelined step ends
+        with, and its visualizer no longer refreshes them (see `kernel_update_vgeoms`).
+        """
         if self.n_vgeoms > 0:
             kernel_update_vgeoms(self.dyn_state, self.dyn_info, self.rigid_config)
+
+    def substep_post_coupling(self):
+        if self.is_active and self.n_dofs > 0:
+            kernel_record_dofs_control_force(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ render ----------------------------------------

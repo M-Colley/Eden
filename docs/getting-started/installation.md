@@ -81,9 +81,10 @@ With plain pip in a clone, `pip install -e ".[vis]"` works for most extras, but 
 
 !!! note "`main` runs on an unreleased Genesis commit"
     Between Genesis releases, `main` may pin `genesis-world` to a commit of its `main` branch, through
-    `[tool.uv.sources]` in `pyproject.toml`; `uv sync` installs it. pip ignores that table too and installs the
-    release the requirement names, on which `eden.init()` raises with the command to run. After a plain-pip install
-    of a clone, install the commit yourself:
+    `[tool.uv.sources]` in `pyproject.toml`; `uv sync` in the clone installs it. Everything else ignores that table
+    and installs the release the requirement names, on which `eden.init()` raises with the command to run: pip, and
+    uv too when Eden is a dependency of another project (uv reads the sources of the project it syncs alone). Then
+    install the commit yourself:
 
     ```bash
     pip install "genesis-world @ https://github.com/Genesis-Embodied-AI/genesis-world/archive/c27c6ca4e79183225d0fe2d25baa61db63ff127f.tar.gz"

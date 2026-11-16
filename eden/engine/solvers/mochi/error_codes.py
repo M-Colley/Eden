@@ -1,17 +1,20 @@
 """Error flags the MochiSolver's kernels raise in the per-environment ``errno`` field of its kinematic tree."""
 
-from enum import IntEnum
+from enum import auto
+
+from genesis.engine.solvers.base_solver import ErrorCode
 
 
-class MochiErrorCode(IntEnum):
-    """Bits above every one of Genesis' ``BackwardErrorCode`` and ``RigidErrorCode``, so the two never collide.
-
-    The MochiSolver flags its own ``errno``, apart from the RigidSolver's, but ``EnvBase`` sorts the flags of both with
-    one mask (``eden.envs.base._RECOVERABLE_SOLVER_ERRORS``), and ``Solver.register_errors`` refuses a bit the base
-    solver reserves (``BackwardErrorCode.INVALID_GRAD_NAN``). A Genesis bump that adds a code above these must move them
-    above it; ``tests/engine/solvers/mochi/test_error_codes.py`` pins it.
+class MochiErrorCode(ErrorCode):
+    """The error flags of the MochiSolver (see ``ErrnoMixin.register_errors``), as Genesis' ``RigidErrorCode`` are the
+    RigidSolver's: each takes a bit of the solver's own ``errno`` above those of the backward pass.
     """
 
-    OVERFLOW_MOCHI_CONTACT_PAIRS = 0b00000000000000000000010000000000
-    OVERFLOW_MOCHI_CONTACTS = 0b00000000000000000000100000000000
-    MOCHI_DIVERGED = 0b00000000000000000001000000000000
+    OVERFLOW_MOCHI_CONTACT_PAIRS = auto()
+    OVERFLOW_MOCHI_CONTACTS = auto()
+    MOCHI_DIVERGED = auto()
+
+
+#: The flags that leave an environment's state corrupt but its scene sound, which a reset of the environment recovers
+#: (see ``eden.envs.base``): a diverged implicit solve. A contact capacity overflow is a misconfiguration.
+RECOVERABLE_MOCHI_ERRORS = MochiErrorCode.MOCHI_DIVERGED

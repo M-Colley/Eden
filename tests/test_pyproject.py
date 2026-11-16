@@ -138,9 +138,7 @@ def test_the_genesis_source_init_names_is_the_one_a_checkout_installs():
     """
     from eden.utils.distribution import GENESIS_SOURCE
 
-    pyproject = _load_pyproject()
-    source = pyproject.get("tool", {}).get("uv", {}).get("sources", {}).get("genesis-world")
-    assert GENESIS_SOURCE == (None if source is None else source["url"])
+    assert GENESIS_SOURCE == _genesis_source()
     # The commit the source names still calls itself the release the requirement pins (see pyproject.toml), which is
     # what lets uv substitute it: a moved pin and a stale requirement would fail to resolve.
     (genesis,) = (req for req in _published_requirements() if req.name == "genesis-world")
@@ -154,6 +152,33 @@ def test_the_genesis_source_init_names_is_the_one_a_checkout_installs():
         )
     }
     assert {url for _, url in written} <= {GENESIS_SOURCE}, sorted(written)
+
+
+def test_the_release_refuses_a_source_that_swaps_a_published_requirement_alone():
+    """`.github/scripts/swapped_requirements.py`, which `release.yml` runs before building: a source of a requirement
+    the wheel publishes would leave the wheel installing what the checkout never ran.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "swapped", REPO_ROOT / ".github" / "scripts" / "swapped_requirements.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    pyproject = {
+        "project": {"dependencies": ["Genesis_World==1.4.6"], "optional-dependencies": {"x": ["foo>=1"]}},
+        "dependency-groups": {"dev": ["bar"]},
+        "tool": {"uv": {"sources": {"genesis-world": {"url": "u"}, "foo": {"git": "g"}, "bar": {"path": "p"}}}},
+    }
+    assert module.swapped_requirements(pyproject) == ["foo", "genesis-world"]
+    assert module.swapped_requirements({"project": {"dependencies": ["a"]}}) == []
+    # Today's pin: the release waits for a genesis-world release holding the commit
+    assert module.swapped_requirements(_load_pyproject()) == (["genesis-world"] if _genesis_source() else [])
+
+
+def _genesis_source() -> str | None:
+    source = _load_pyproject().get("tool", {}).get("uv", {}).get("sources", {}).get("genesis-world")
+    return None if source is None else source["url"]
 
 
 def test_each_unpublished_requirement_is_the_pin_its_extras_git_group_installs():

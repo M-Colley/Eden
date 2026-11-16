@@ -32,6 +32,7 @@ import genesis.utils.geom as gu
 import numpy as np
 import torch
 from genesis.typing import UnitVec4FType, Vec2FType, Vec3FType
+from genesis.utils.misc import qd_from_torch, qd_to_torch
 
 import eden as en
 from eden.utils.contacts import aggregate_grouped_contacts, resolve_local_link_idx
@@ -387,8 +388,6 @@ def _dofs_pos_plan(entity: RigidEntity, dofs_idx_local) -> _DofsPosPlan:
 def _qpos0(solver) -> torch.Tensor:
     qpos0 = _QPOS0.get(solver)
     if qpos0 is None:
-        from genesis.utils.misc import qd_to_torch
-
         qpos0 = _QPOS0[solver] = qd_to_torch(solver.qpos0, transpose=True, copy=not gs.use_zerocopy)
     return qpos0
 
@@ -3828,41 +3827,49 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         )
         # NOTE: force to update collision state
         entity.solver.collider.clear()
-        # NOTE: update slightly bigger AABBs
-        entity._kernel_update_aabbs(
-            self.solver.dyn_state.geoms.pos,
-            self.solver.dyn_state.geoms.quat,
-            self.solver.rigid_info.geoms_init_AABB,
-            self.solver.dyn_state.geoms.aabb_min,
-            self.solver.dyn_state.geoms.aabb_max,
-        )
-        # NOTE: use broad phase to check the occupied space on the support surface
-        self._run_broad_phase()
-        tensor = torch.zeros(
-            (self._env.num_envs, self.solver.n_entities, 2, 3),
-            dtype=gs.tc_float,
-            device=self.device,
-        )
-        tensor[..., 0, :] = torch.inf
-        tensor[..., 1, :] = -torch.inf
-        valid_mask = torch.zeros(
-            (self._env.num_envs, self.solver.n_entities),
-            dtype=gs.tc_int,
-            device=self.device,
-        )
-        # NOTE: get set of AABBs that is already occupied
-        entity._kernel_filter_detection(
-            tensor,
-            valid_mask,
-            self.solver.collider.collider_state.n_broad_pairs,
-            self.solver.collider.collider_state.broad_collision_pairs,
-            self.solver.dyn_info.geoms.link_idx,
-            self.solver.dyn_info.links.entity_idx,
-            self.solver.dyn_info.entities.geom_start,
-            self.solver.dyn_info.entities.geom_end,
-            self.solver.dyn_state.geoms.aabb_min,
-            self.solver.dyn_state.geoms.aabb_max,
-        )
+        # The query inflates the live geom boxes, which the solver refits only as it places a movable geom: the boxes of
+        # the world-fixed geoms would stay inflated for every later step, so they are put back once it is done.
+        geoms_state = self.solver.dyn_state.geoms
+        aabb_min, aabb_max = qd_to_torch(geoms_state.aabb_min, copy=True), qd_to_torch(geoms_state.aabb_max, copy=True)
+        try:
+            # NOTE: update slightly bigger AABBs
+            entity._kernel_update_aabbs(
+                self.solver.dyn_state.geoms.pos,
+                self.solver.dyn_state.geoms.quat,
+                self.solver.rigid_info.geoms_init_AABB,
+                self.solver.dyn_state.geoms.aabb_min,
+                self.solver.dyn_state.geoms.aabb_max,
+            )
+            # NOTE: use broad phase to check the occupied space on the support surface
+            self._run_broad_phase()
+            tensor = torch.zeros(
+                (self._env.num_envs, self.solver.n_entities, 2, 3),
+                dtype=gs.tc_float,
+                device=self.device,
+            )
+            tensor[..., 0, :] = torch.inf
+            tensor[..., 1, :] = -torch.inf
+            valid_mask = torch.zeros(
+                (self._env.num_envs, self.solver.n_entities),
+                dtype=gs.tc_int,
+                device=self.device,
+            )
+            # NOTE: get set of AABBs that is already occupied
+            entity._kernel_filter_detection(
+                tensor,
+                valid_mask,
+                self.solver.collider.collider_state.n_broad_pairs,
+                self.solver.collider.collider_state.broad_collision_pairs,
+                self.solver.dyn_info.geoms.link_idx,
+                self.solver.dyn_info.links.entity_idx,
+                self.solver.dyn_info.entities.geom_start,
+                self.solver.dyn_info.entities.geom_end,
+                self.solver.dyn_state.geoms.aabb_min,
+                self.solver.dyn_state.geoms.aabb_max,
+            )
+        finally:
+            qd_from_torch(geoms_state.aabb_min, aabb_min)
+            qd_from_torch(geoms_state.aabb_max, aabb_max)
         AABBs = tensor[:, (valid_mask == 1).any(dim=0)]
         AABBs = AABBs[envs_idx]
 

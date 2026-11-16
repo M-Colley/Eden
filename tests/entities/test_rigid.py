@@ -661,6 +661,29 @@ def test_place_on_to_rests_the_object_on_the_support_surface(batched_env):
     assert torch.all(cube.get_pos()[:, 2] > _TABLE_TOP)
 
 
+def test_place_on_to_leaves_the_geom_boxes_of_the_scene_as_it_found_them(batched_env, monkeypatch):
+    """The query inflates every geom's box for the broad phase. Genesis refits a box only as it places a movable geom
+    (genesis-world#3773), so an inflated box of a world-fixed geom would widen every later broad phase. The placement's
+    own setter is stubbed out: its forward kinematics refits every box on the kernel path, but not on the zero-copy
+    path a fixed-base entity takes.
+    """
+    from genesis.utils.misc import qd_to_torch
+
+    from eden.managers.terms.events.placement import uniform_sampler
+
+    geoms = batched_env.rigid_solver.dyn_state.geoms
+    before = qd_to_torch(geoms.aabb_min, copy=True), qd_to_torch(geoms.aabb_max, copy=True)
+    placed = batched_env.entities["placed"]
+    monkeypatch.setattr(placed, "set_pos", lambda *args, **kwargs: None)
+    placed.place_on_to(batched_env.entities["table"], sampler=uniform_sampler)
+    batched_env.scene.step()  # the movable geoms are refitted, the world-fixed ones only restored
+    after = qd_to_torch(geoms.aabb_min, copy=True), qd_to_torch(geoms.aabb_max, copy=True)
+    fixed = torch.tensor([geom.is_fixed for geom in batched_env.rigid_solver.geoms], device=after[0].device)
+    assert fixed.any()
+    for got, want in zip(after, before):
+        torch.testing.assert_close(got[fixed], want[fixed], rtol=0.0, atol=0.0)
+
+
 # ── per-link mass ─────────────────────────────────────────────────────────────────────────────────
 
 

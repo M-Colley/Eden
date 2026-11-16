@@ -53,9 +53,9 @@ def _kernel_broad_phase(
     """Run Genesis' collider broad phase on its own.
 
     ``func_broad_phase`` is a ``@qd.func`` since https://github.com/Genesis-Embodied-AI/Genesis/pull/3433, so it can
-    only be called from inside a kernel, and Genesis' own kernel around it (``kernel_detection``) first recomputes
-    the geom AABBs, which would discard the inflated ones :meth:`SupportSurfaceMixin._kernel_update_aabbs` writes.
-    The argument list mirrors the ``func_broad_phase`` call in Genesis' ``func_detection``.
+    only be called from inside a kernel, and Genesis' own kernel around it (``kernel_detection``) runs the narrow phase
+    too. The broad phase reads the inflated geom boxes :meth:`SupportSurfaceMixin._kernel_update_aabbs` writes, which
+    ``RigidEntity.place_on_to`` puts back afterwards. The argument list mirrors the ``func_broad_phase`` call in Genesis' ``func_detection``.
     """
     func_broad_phase(
         dyn_state,

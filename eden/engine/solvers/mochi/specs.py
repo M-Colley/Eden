@@ -24,6 +24,10 @@ class MochiRigidSpec(gs.entities.Rigid):
     A ``gs.entities.Rigid`` whose material is a ``MochiRigid``, of one morph: the MochiSolver simulates no
     heterogeneous entity. Contact is a property of the material (``MochiRigid``), not of the geoms, so no option is set
     on a selection of links or geoms; ``MochiEntity.set_contact_params`` changes it per link once the scene is built.
+
+    Only a scene :func:`~eden.engine.solvers.mochi.hosting.install_mochi_solver` was called on knows it: elsewhere it is
+    the ``gs.entities.Rigid`` it derives from, which the RigidSolver simulates. Genesis offers no hook to refuse it there
+    short of patching its classes, which the hosting never does; Eden's scenes install the solver themselves.
     """
 
     _admits_variants = False

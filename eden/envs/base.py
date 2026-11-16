@@ -35,7 +35,7 @@ from genesis.typing import Vec2FType
 import eden as en
 from eden.constants import EventMode
 from eden.entities.camera import Camera
-from eden.engine.solvers.mochi.error_codes import MochiErrorCode
+from eden.engine.solvers.mochi.error_codes import RECOVERABLE_MOCHI_ERRORS
 from eden.entities.sensor import Sensor
 from eden.envs.draw_debug_mixin import DrawDebugMixin
 from eden.envs.graded_graph import BakedHostReadError, GradedPhaseGraph
@@ -66,6 +66,7 @@ from eden.utils.configs import EdenConfig, EdenMimicConfig, EdenRLConfig
 from eden.utils.misc import (
     assert_built,
     assert_unbuilt,
+    env_indices,
     invert_segmentation_idx_dict,
     resolve_named_entity,
     sanitize_envs_idx,
@@ -109,21 +110,20 @@ TConfig = TypeVar("TConfig", bound=EdenConfig)
 _R = TypeVar("_R")
 
 
-#: The solver errors that leave an env's state corrupt but its scene sound, which a reset of the env recovers:
-#: a NaN contact, force or acceleration and a diverged implicit solve. Every other error a solver registers is a
-#: misconfiguration of the scene, which a reset must not hide: a contact capacity overflow, an unsupported collision
-#: pair, or a NaN gradient under ``requires_grad`` (a rollout too stiff to differentiate, which the message says how to
-#: shorten).
-_RECOVERABLE_SOLVER_ERRORS = (
-    RigidErrorCode.INVALID_CONTACT_NAN
-    | RigidErrorCode.INVALID_FORCE_NAN
-    | RigidErrorCode.INVALID_ACC_NAN
-    | MochiErrorCode.MOCHI_DIVERGED
+#: The RigidSolver's errors that leave an env's state corrupt but its scene sound, which a reset of the env recovers: a
+#: NaN contact, force or acceleration (the MochiSolver's are ``RECOVERABLE_MOCHI_ERRORS``: a diverged implicit solve).
+#: Every other error a solver registers is a misconfiguration of the scene, which a reset must not hide: a contact
+#: capacity overflow, an unsupported collision pair, or a NaN gradient under ``requires_grad`` (a rollout too stiff to
+#: differentiate, which the message says how to shorten). Each solver numbers its errors in its own ``errno`` from the
+#: same low bits, so a mask holds the codes of one solver alone.
+_RECOVERABLE_RIGID_ERRORS = (
+    RigidErrorCode.INVALID_CONTACT_NAN | RigidErrorCode.INVALID_FORCE_NAN | RigidErrorCode.INVALID_ACC_NAN
 )
 
 
-def _misconfiguration_errors(solver) -> int:
-    """The bits of the errors ``solver`` registered that are a misconfiguration of the scene, not a corrupt state.
+def _misconfiguration_errors(solver, recoverable: int) -> int:
+    """The bits of the errors ``solver`` registered that are a misconfiguration of the scene, not a corrupt state:
+    every one but ``recoverable``, the solver's own codes of a corrupt state.
 
     Only a registered error has a message the check raises; a bit no kernel registered would be carried past every
     reset without ever raising, so it is left to the reset like a corrupt state.
@@ -131,7 +131,7 @@ def _misconfiguration_errors(solver) -> int:
     registered = 0
     for code in _solver_errno_attribute(solver, "_error_reports"):
         registered |= int(code)
-    return registered & ~_RECOVERABLE_SOLVER_ERRORS
+    return registered & ~int(recoverable)
 
 
 def _latched_errors(solver) -> torch.Tensor:
@@ -792,10 +792,17 @@ class EnvBase(DrawDebugMixin, RBC, Generic[TConfig]):
         the NaN gradient of ``requires_grad`` in ``Solver.build``), so the codes read then are all there will be.
         """
         if self._misconfigurations is None:
-            solvers = [solver for solver in (self.rigid_solver, self._mochi_solver) if solver is not None]
+            solvers = [
+                (solver, recoverable)
+                for solver, recoverable in (
+                    (self.rigid_solver, _RECOVERABLE_RIGID_ERRORS),
+                    (self._mochi_solver, RECOVERABLE_MOCHI_ERRORS),
+                )
+                if solver is not None
+            ]
             self._misconfigurations = [
-                (solver, _misconfiguration_errors(solver), torch.zeros_like(_latched_errors(solver)))
-                for solver in solvers
+                (solver, _misconfiguration_errors(solver, recoverable), torch.zeros_like(_latched_errors(solver)))
+                for solver, recoverable in solvers
             ]
         return self._misconfigurations
 
@@ -1162,7 +1169,7 @@ class EnvBase(DrawDebugMixin, RBC, Generic[TConfig]):
         before the next error check would raise for the whole scene.
 
         A misconfiguration of the scene (a contact capacity overflow, an unsupported collision pair, a NaN gradient
-        under ``requires_grad``; see ``_RECOVERABLE_SOLVER_ERRORS``) is reset and dropped the same way, but the env
+        under ``requires_grad``; see ``_RECOVERABLE_RIGID_ERRORS``) is reset and dropped the same way, but the env
         keeps its flag across the reset, and the next control step raises it with the message that names the option to
         change (on CUDA, whose check does not wait for the device, the one after).
         """
@@ -1624,7 +1631,11 @@ class EnvBase(DrawDebugMixin, RBC, Generic[TConfig]):
         # call on them (the MochiSolver's do). Those of a misconfiguration are kept here meanwhile, for the next
         # control step to raise (see `_raise_kept_misconfigurations`).
         self._keep_misconfigurations()
-        self.scene.reset(state=self.reset_state, envs_idx=_reset_envs_idx)
+        # Handed ids, not a mask: the solvers' `set_state` turns a mask into ids itself, a sync per reset, while the
+        # auto-reset took them once for every consumer (`sharing_env_indices`).
+        self.scene.reset(
+            state=self.reset_state, envs_idx=None if _reset_envs_idx is None else env_indices(_reset_envs_idx)
+        )
         for solver in (self.rigid_solver, self._mochi_solver):
             if solver is not None:
                 _zero_applied_control_force(solver, _reset_envs_idx)

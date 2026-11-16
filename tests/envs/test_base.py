@@ -1460,7 +1460,7 @@ def test_an_optional_manager_with_no_terms_is_none_and_the_others_always_exist(p
     ids=["missing-factory", "unordered-factory"],
 )
 def test_a_factory_map_that_disagrees_with_the_order_raises_before_building_anything(edit, message):
-    """``_load_managers.__wrapped__`` skips the ``@gs.assert_built`` guard, which is about the scene, not the order."""
+    """``_load_managers.__wrapped__`` skips the ``@assert_built`` guard, which is about the scene, not the order."""
 
     class Edited(RLEnvBase):
         def _manager_factories(self):
@@ -1780,7 +1780,7 @@ def test_a_flag_no_solver_registered_is_reset_like_a_corrupt_state(decimated_box
     """A bit without a message never raises, so carrying it past the reset would reset its env at every control step."""
     env = decimated_box_env
     unregistered = 1 << 20
-    assert not any(int(code) & unregistered for code in env.rigid_solver._error_messages)
+    assert not any(int(code) & unregistered for code in env.rigid_solver._error_reports)
     corrupt_env_1 = _corrupt_env_1_in_sim_step(env, 0, unregistered)
     try:
         env.reset()

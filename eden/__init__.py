@@ -151,8 +151,8 @@ def _require_genesis_api() -> None:
     raise ImportError(
         f"The installed genesis-world {installed_version('genesis-world')} predates the Genesis API Eden is written "
         "for (it lacks `genesis.options.entities`). In a checkout of Eden, run `uv sync`, which installs the Genesis "
-        f"that pyproject.toml pins; otherwise run {install}. Pinning genesis-world to the 1.4.6 release does not help: "
-        "Eden no longer runs on it."
+        f"that pyproject.toml pins; otherwise run {install}. Pinning genesis-world back to the release it reports does "
+        "not help: Eden no longer runs on it."
     )
 
 
