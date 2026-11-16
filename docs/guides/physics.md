@@ -396,17 +396,21 @@ The scripts in `examples/recipes/mochi/` cover each body type, articulated grasp
 
 ## Solver errors and recovery
 
-A physics solver latches an error flag per environment. Eden splits them in two:
+A physics solver, and the SAP coupler, latch an error flag per environment. Eden splits them in two, by the class of
+the error code (`_RECOVERABLE_ERRORS` in `eden/envs/base.py`):
 
-- **A corrupt state** (a NaN contact force, acceleration or force in the rigid solver, a diverged Mochi solve) is
-  recovered: the termination manager truncates the affected envs, the reward and metric managers drop what their
+- **A corrupt state** (a NaN contact force, acceleration or force in the rigid solver, a diverged Mochi solve, a NaN
+  FEM vertex or MPM particle velocity, an SAP solve stopped at its iteration cap) is recovered: the termination manager truncates the affected envs, the reward and metric managers drop what their
   terms read of them, and the reset clears the flag before Genesis' error check would raise for the whole scene.
   `env.get_solver_error_envs_mask()` returns these envs, `(num_envs,)` bool.
-- **A misconfiguration** (contact capacity overflow, an unsupported collision pair, a NaN gradient under
-  `requires_grad`) is reset and dropped the same way, but the env keeps its flag across the reset, and the next
-  control step raises it (on CUDA, the one after) with Genesis' message naming the option to change.
+- **A misconfiguration** (a contact capacity overflow of any solver or of the SAP coupler, an unsupported collision
+  pair, a NaN gradient under `requires_grad`) is reset and dropped the same way, but the env keeps its flag across
+  the reset, and the next control step raises it (on CUDA, the one after) with Genesis' message naming the option to
+  change. So is every error of a class Eden does not list: a new kind of error raises rather than being reset away.
 
-So a training run survives an occasional exploding env, but not a scene that is too small for its contacts.
+So a training run survives an occasional exploding env, but not a scene that is too small for its contacts. A
+recovered error is silent beyond `Episode_Termination/solver_error`: a rate that does not fall (an SAP solve that
+keeps hitting its cap, say) is the hint to raise the option the error names.
 
 ## Throughput switches
 

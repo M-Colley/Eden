@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 from genesis.engine.scene import SCENE_FORMAT
+from genesis.utils.misc import qd_to_torch
 
 from eden.engine.solvers.mochi import (
     MochiOptions,
@@ -208,6 +209,58 @@ def test_a_saved_state_restores_the_mochi_bodies_of_the_environments_it_is_given
     state.solvers.pop(type(scene.mochi_solver).__name__)
     with pytest.raises(gs.GenesisException, match="holds no state of the MochiSolver"):
         scene.reset(state)
+
+
+@pytest.mark.parametrize("step_kernel", ["monolith", "pipeline", "graph"])
+def test_the_visual_geoms_follow_the_links_after_a_step_of_every_kernel(step_kernel):
+    """Genesis places the visual geoms in its own forward kinematics, which the pipelined step ends with; the
+    single-kernel steps run Mochi's, and the solver places them itself after the last substep. A geom left behind
+    would draw the body frozen where it was built.
+    """
+    scene = create_mochi_scene(
+        sim_options=gs.options.SimOptions(**SIM_OPTIONS, substeps=2),
+        mochi_options=MochiOptions(n_newton_iterations=8, step_kernel=step_kernel),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane(), material=mochi_materials.Rigid())
+    box = scene.add_entity(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.5)), material=mochi_materials.Rigid())
+    scene.build(n_envs=2)
+    for _ in range(3):
+        scene.step()
+    solver = scene.mochi_solver
+    vgeoms_pos = qd_to_torch(solver.dyn_state.vgeoms.pos)  # (n_vgeoms, n_envs, 3)
+    for vgeom in box.vgeoms:
+        torch.testing.assert_close(vgeoms_pos[vgeom.idx], box.get_pos(), rtol=0.0, atol=1e-5)
+    assert float(box.get_pos()[:, 2].max()) < 0.5 - 1e-3  # it fell: the check is not of the build pose
+
+
+def test_a_partial_reset_resumes_the_environment_as_an_uninterrupted_run_would():
+    """BDF2 extrapolates from the history of the step, which a reset of an env restores with its state. The reset's own
+    notification marks the env as changed from outside, which `set_state` must clear once the history is back, or the
+    next step would rebuild it and start a backward-Euler step instead.
+    """
+    scene = create_mochi_scene(
+        sim_options=gs.options.SimOptions(**SIM_OPTIONS),
+        mochi_options=MochiOptions(n_newton_iterations=8, integrator="bdf2"),
+        show_viewer=False,
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 2.0)), material=mochi_materials.Rigid())
+    scene.build(n_envs=2)
+    box.set_dofs_velocity(torch.tensor([[0.0, 0.0, 0.0, 1.0, 2.0, 0.0]] * 2, device=gs.device))
+    for _ in range(3):
+        scene.step()
+    state = scene.get_state()
+    for _ in range(4):
+        scene.step()
+    reference = (box.get_pos().clone(), box.get_quat().clone())
+    for _ in range(2):
+        scene.step()
+
+    scene.reset(state, envs_idx=[1])
+    for _ in range(4):
+        scene.step()
+    torch.testing.assert_close(box.get_pos()[1], reference[0][1], rtol=0.0, atol=1e-6)
+    torch.testing.assert_close(box.get_quat()[1], reference[1][1], rtol=0.0, atol=1e-6)
 
 
 def test_an_error_raises_at_the_next_check_unless_its_environment_is_reset():

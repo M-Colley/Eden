@@ -34,6 +34,17 @@ class MochiRigidSpec(gs.entities.Rigid):
 
     material: mochi_materials.MochiRigid = Field(default_factory=mochi_materials.MochiRigid)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _check_one_morph(cls, data: Any) -> Any:
+        # Ahead of Genesis' check, whose message names the class as `gs.entities.MochiRigidSpec`
+        morph = data.get("morph") if isinstance(data, dict) else None
+        if isinstance(morph, (tuple, list)) and len(morph) > 1:
+            gs.raise_exception(
+                f"The MochiSolver simulates no heterogeneous entity: pass MochiRigidSpec one morph, got {len(morph)}."
+            )
+        return data
+
     @model_validator(mode="after")
     def _check_visualize_contact(self) -> Self:
         if self.visualize_contact:

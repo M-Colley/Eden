@@ -3870,6 +3870,8 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         finally:
             qd_from_torch(geoms_state.aabb_min, aabb_min)
             qd_from_torch(geoms_state.aabb_max, aabb_max)
+            if gs.backend == gs.metal:  # a torch write must land before the next kernel reads it (see `qd_from_torch`)
+                torch.mps.synchronize()
         AABBs = tensor[:, (valid_mask == 1).any(dim=0)]
         AABBs = AABBs[envs_idx]
 

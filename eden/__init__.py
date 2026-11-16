@@ -143,7 +143,12 @@ def _require_genesis_api() -> None:
     spec = importlib.util.find_spec("genesis")
     if spec is None or not spec.submodule_search_locations:
         return
-    if any(os.path.isfile(os.path.join(root, "options", "entities.py")) for root in spec.submodule_search_locations):
+    roots = list(spec.submodule_search_locations)
+    # A package read from an archive (a zipped or frozen install) cannot be looked into without importing it
+    if not all(os.path.isdir(root) for root in roots):
+        return
+    entities = ("entities.py", "entities.pyc", "entities")  # a source module, a sourceless one, or a package
+    if any(os.path.exists(os.path.join(root, "options", name)) for root in roots for name in entities):
         return
     from eden.utils.distribution import GENESIS_SOURCE, installed_version
 
@@ -152,11 +157,13 @@ def _require_genesis_api() -> None:
         if GENESIS_SOURCE is not None
         else "`pip install --upgrade genesis-world`"
     )
+    version = installed_version("genesis-world") or "of unknown version"
     raise ImportError(
-        f"The installed genesis-world {installed_version('genesis-world')} predates the Genesis API Eden is written "
-        "for (it lacks `genesis.options.entities`). In a checkout of Eden, run `uv sync`, which installs the Genesis "
-        f"that pyproject.toml pins; otherwise run {install}. Pinning genesis-world back to the release it reports does "
-        "not help: Eden no longer runs on it."
+        f"The Genesis found at {os.pathsep.join(roots)} (genesis-world {version}) predates the Genesis API Eden is "
+        "written for: it lacks `genesis.options.entities`. In a checkout of Eden, run `uv sync`, which installs the "
+        f"Genesis that pyproject.toml pins; otherwise run {install}. If that path is not the environment you installed "
+        "into, another Genesis shadows it (PYTHONPATH, an editable checkout). Pinning genesis-world back to the "
+        "release it reports does not help: Eden no longer runs on it."
     )
 
 

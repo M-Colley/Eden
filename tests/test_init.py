@@ -508,7 +508,8 @@ def test_import_eden_names_the_genesis_to_install_when_the_installed_one_predate
     with pytest.raises(ImportError, match="predates the Genesis API Eden is written for") as raised:
         en._require_genesis_api()
     assert "uv sync" in str(raised.value) and (GENESIS_SOURCE is None or GENESIS_SOURCE in str(raised.value))
-    (old / "options" / "entities.py").touch()
-    en._require_genesis_api()  # an API that has entity specs
+    assert str(old) in str(raised.value)  # the Genesis it found, which may shadow the one installed
+    (old / "options" / "entities").mkdir()
+    en._require_genesis_api()  # an API that has entity specs, as a package
     monkeypatch.undo()
     en._require_genesis_api()  # the installed one

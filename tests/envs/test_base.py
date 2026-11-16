@@ -1776,6 +1776,42 @@ def test_a_misconfiguration_a_substep_callback_clears_raises_at_the_next_control
         env.step()
 
 
+def test_every_class_of_error_codes_of_genesis_and_eden_is_sorted_deliberately():
+    """A Genesis bump that adds an error code, or a class of them, changes what a reset may clear: an unknown class keeps
+    every error (it raises), a new code of a known class is a misconfiguration. Either is a decision of the bump.
+    """
+    from genesis.engine.solvers.base_solver import BackwardErrorCode, ErrorCode
+
+    from eden.envs.base import _RECOVERABLE_ERRORS
+
+    known = {
+        cls for cls in ErrorCode.__subclasses__() if cls.__module__.startswith(("genesis.", "eden."))
+    }  # not the classes the tests define
+    assert known == set(_RECOVERABLE_ERRORS)
+    members = {cls.__name__: sorted(code.name for code in cls) for cls in (*_RECOVERABLE_ERRORS, BackwardErrorCode)}
+    assert members == {
+        "RigidErrorCode": [
+            "INVALID_ACC_NAN",
+            "INVALID_CONTACT_NAN",
+            "INVALID_FORCE_NAN",
+            "OVERFLOW_CANDIDATE_CONTACTS",
+            "OVERFLOW_COLLISION_PAIRS",
+            "OVERFLOW_CONTACTS",
+            "UNSUPPORTED_COLLISION_PAIR",
+        ],
+        "MochiErrorCode": ["MOCHI_DIVERGED", "OVERFLOW_MOCHI_CONTACTS", "OVERFLOW_MOCHI_CONTACT_PAIRS"],
+        "FEMErrorCode": ["INVALID_VERTEX_NAN"],
+        "MPMErrorCode": ["INVALID_VELOCITY_NAN"],
+        "SAPErrorCode": ["INVALID_SOLVE", "OVERFLOW_CANDIDATE_CONTACTS", "OVERFLOW_CONTACTS", "OVERFLOW_QUERY_RESULTS"],
+        "BackwardErrorCode": ["INVALID_GRAD_NAN"],
+    }
+
+
+def test_the_errors_eden_reads_are_those_of_the_systems_that_register_any(decimated_box_env):
+    """The coupler of a rigid scene (the legacy one) registers no error; the rigid solver does."""
+    assert decimated_box_env._error_systems() == [decimated_box_env.rigid_solver]
+
+
 def test_each_class_of_error_codes_sorts_its_own_errors_and_an_unknown_class_is_never_reset_away():
     """Every solver and the coupler number their errors from the same low bits in their own errno, so what a reset may
     clear is decided per class of codes; a class Eden does not know keeps every error, which then raises.

@@ -270,8 +270,8 @@ def _bind_rasterizer(scene: Scene, solver: MochiSolver) -> None:
     """Draw the MochiSolver's bodies with the rasterizer of ``scene`` (its cameras and its interactive viewer).
 
     The rasterizer draws the rigid-like bodies of the solvers ``_rigid_solvers`` yields, and the deformable ones of the
-    FEMSolver; each gains the MochiSolver here, on this scene's instances. The visualizer refreshes the visual geoms of
-    every active solver derived from ``KinematicSolver``, the MochiSolver included, on its own.
+    FEMSolver; each gains the MochiSolver here, on this scene's instances. The visual geoms it draws are placed by the
+    solver itself (``MochiSolver._update_vgeoms``): Genesis' visualizer no longer refreshes them.
     """
     context = scene.visualizer.context
     rigid_solvers = context._rigid_solvers

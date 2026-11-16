@@ -298,10 +298,18 @@ HIMPPO), and evaluation recording that needs the terminal frame. It is off by de
 To change what counts as the terminal observation, override `RLEnvBase._compute_final_observations()`,
 for example to skip a group whose terms are unsafe to evaluate on the post-physics state.
 
+### What the scene reset restores
+
+Phase 13 restores each reset environment to the scene state taken in `post_build_setup()` (`env.reset_state`):
+the state every solver declares (Genesis' `DataKind.STATE`: coordinates, velocities, control targets and modes)
+as it stood then, startup events included. What Genesis holds as the model rather than the state (masses,
+friction ratios, gains, set by setters or INTERVAL events) is not reset: an INTERVAL friction randomization
+carries over a reset. RESET events re-randomize what they set, so randomize per episode with RESET mode.
+
 ### Solver errors
 
-A physics solver that leaves an environment's state corrupt (a NaN contact, force or acceleration, or a
-diverged Mochi solve) does not stop the run:
+A physics solver or coupler that leaves an environment's state corrupt (a NaN contact, force or acceleration, a
+diverged Mochi solve, a NaN FEM or MPM state, an SAP solve at its iteration cap) does not stop the run:
 
 - phases 6 and 9 drop what the metric and reward terms read from those environments, so no NaN reaches
   the learner;
@@ -315,8 +323,9 @@ the check that would raise for the whole scene. An environment that nothing rese
 raises at the next control step.
 
 A **misconfiguration** of the scene is never reset away. An environment flagged with a contact capacity
-overflow, an unsupported collision pair or, under `requires_grad`, a NaN gradient is truncated and its
-values dropped like any other, but it keeps the flag across the reset. The flag is handed back to the
+overflow (of any solver, or of the SAP coupler), an unsupported collision pair, under `requires_grad` a NaN
+gradient, or an error of a class `_RECOVERABLE_ERRORS` does not list is truncated and its values dropped
+like any other, but it keeps the flag across the reset. The flag is handed back to the
 solver right before the first `scene.step()` of the next control step, which then raises with a message
 naming the option to change (on CUDA, the step after that, since its check does not wait for the
 device).

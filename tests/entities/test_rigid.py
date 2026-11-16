@@ -664,8 +664,8 @@ def test_place_on_to_rests_the_object_on_the_support_surface(batched_env):
 def test_place_on_to_leaves_the_geom_boxes_of_the_scene_as_it_found_them(batched_env, monkeypatch):
     """The query inflates every geom's box for the broad phase. Genesis refits a box only as it places a movable geom
     (genesis-world#3773), so an inflated box of a world-fixed geom would widen every later broad phase. The placement's
-    own setter is stubbed out: its forward kinematics refits every box on the kernel path, but not on the zero-copy
-    path a fixed-base entity takes.
+    own setter is stubbed out: the forward kinematics it runs refits every box, which would hide a query that left them
+    inflated, and a placement whose setter does not run (no valid sample) must not leave them so either.
     """
     from genesis.utils.misc import qd_to_torch
 

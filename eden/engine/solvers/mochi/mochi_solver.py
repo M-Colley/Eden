@@ -2358,12 +2358,14 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
 
     def _update_vgeoms(self):
-        """Place the visual geoms on the links a single-kernel step left, which ran its own kinematics.
+        """Place the visual geoms on the links a single-kernel step left, which ran its own kinematics, once the last
+        substep of the scene step is over: only a step's end is drawn or read.
 
-        Genesis places them within its forward kinematics (`kernel_forward_kinematics`), which the pipelined step ends
-        with, and its visualizer no longer refreshes them (see `kernel_update_vgeoms`).
+        Genesis places them within its forward kinematics (`kernel_forward_kinematics`), which the pipelined step and
+        every setter end with, and its visualizer no longer refreshes them (see `kernel_update_vgeoms`).
         """
-        if self.n_vgeoms > 0:
+        is_last_substep = (self.sim.cur_substep_global + 1) % self._substeps == 0
+        if is_last_substep and self.n_vgeoms > 0:
             kernel_update_vgeoms(self.dyn_state, self.dyn_info, self.rigid_config)
 
     def substep_post_coupling(self):
@@ -2899,8 +2901,9 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     @mutates(StateChange.MODEL)
     def set_links_contact_params(self, links_idx, **params):
         links_idx = tensor_to_array(links_idx).reshape((-1,))
+        links = self.links  # a copy on every access
         geoms_idx = np.concatenate(
-            [np.arange(self.links[i_l].geom_start, self.links[i_l].geom_end) for i_l in links_idx], dtype=gs.np_int
+            [np.arange(links[i_l].geom_start, links[i_l].geom_end) for i_l in links_idx], dtype=gs.np_int
         )
         for name, value in params.items():
             if value is None:

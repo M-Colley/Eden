@@ -118,7 +118,8 @@ _R = TypeVar("_R")
 #: misconfiguration of the scene, which a reset must not hide: a capacity overflow, an unsupported collision pair, or a
 #: NaN gradient under ``requires_grad`` (``BackwardErrorCode``: a rollout too stiff to differentiate, which the message
 #: says how to shorten). So is every error of a class missing here: kept across the reset and raised, never hidden.
-#: Each system numbers its errors from the same low bits in its own ``errno``, so a mask holds the codes of one class.
+#: Each system numbers its errors from the same low bits in its own ``errno``, and a solver's holds two classes (its
+#: own and ``BackwardErrorCode``), so each registered code is sorted by its own class, never by its system's.
 _RECOVERABLE_ERRORS: dict[type, int] = {
     RigidErrorCode: RigidErrorCode.INVALID_CONTACT_NAN
     | RigidErrorCode.INVALID_FORCE_NAN
@@ -797,11 +798,12 @@ class EnvBase(DrawDebugMixin, RBC, Generic[TConfig]):
         """
         (self._pre_substep_callbacks if before else self._substep_callbacks).append(callback)
 
+    @assert_built
     def _error_systems(self) -> list[Any]:
         """The solvers and the coupler of the scene that registered errors: those whose flags Eden reads.
 
         Every active system of the simulator carries per-env error flags (``ErrnoMixin``), the coupler included, but
-        only one that registered an error ever raises one. Listed once, after the build: every system registers its
+        only one that registered an error ever raises one. Listed once the scene is built: every system registers its
         errors as it builds (``ErrnoMixin.register_errors``; the NaN gradient of ``requires_grad`` in ``Solver.build``),
         so the ones read then are all there will be.
         """

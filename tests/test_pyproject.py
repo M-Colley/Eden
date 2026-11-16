@@ -171,6 +171,9 @@ def test_the_release_refuses_a_source_that_swaps_a_published_requirement_alone()
         "tool": {"uv": {"sources": {"genesis-world": {"url": "u"}, "foo": {"git": "g"}, "bar": {"path": "p"}}}},
     }
     assert module.swapped_requirements(pyproject) == ["foo", "genesis-world"]
+    # An index source installs the same release from another index (torch from a CUDA index)
+    pyproject["tool"]["uv"]["sources"] = {"foo": [{"index": "cu128", "marker": "sys_platform == 'linux'"}]}
+    assert module.swapped_requirements(pyproject) == []
     assert module.swapped_requirements({"project": {"dependencies": ["a"]}}) == []
     # Today's pin: the release waits for a genesis-world release holding the commit
     assert module.swapped_requirements(_load_pyproject()) == (["genesis-world"] if _genesis_source() else [])
