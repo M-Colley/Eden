@@ -129,6 +129,33 @@ from eden.utils.smoke import is_smoke  # noqa: F401
 _DEFAULT_BACKEND = None
 
 
+def _require_genesis_api() -> None:
+    """Raise, naming the command that fixes it, when the installed genesis-world predates the API Eden is written for.
+
+    Its version cannot tell: the unreleased commit Eden runs on still calls itself 1.4.6 (see
+    ``eden.utils.distribution.GENESIS_SOURCE``), as the release does. The entity specs (``genesis.options.entities``)
+    are the most recent part of that API Eden reads, and the release lacks them; without this check, the first Eden
+    module to import a part it lacks fails with a bare ``ModuleNotFoundError``.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("genesis.options.entities") is not None:
+        return
+    from eden.utils.distribution import GENESIS_SOURCE, installed_version
+
+    install = (
+        f'`pip install "genesis-world @ {GENESIS_SOURCE}"`'
+        if GENESIS_SOURCE is not None
+        else "`pip install --upgrade genesis-world`"
+    )
+    raise ImportError(
+        f"The installed genesis-world {installed_version('genesis-world')} predates the Genesis API Eden is written "
+        "for (it lacks `genesis.options.entities`). In a checkout of Eden, run `uv sync`, which installs the Genesis "
+        f"that pyproject.toml pins; otherwise run {install}. Pinning genesis-world to the 1.4.6 release does not help: "
+        "Eden no longer runs on it."
+    )
+
+
 def init(
     backend=_DEFAULT_BACKEND,
     initialize_genesis: bool = True,
@@ -220,6 +247,8 @@ def init(
     # that genuinely needs them, and `_isolate_gpu_for_ddp()` ran at module import, long before.
     import genesis as gs
     import torch
+
+    _require_genesis_api()
 
     from eden.utils import distributed
     from eden.utils.torch import configure_torch_backends

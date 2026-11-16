@@ -28,7 +28,7 @@ import numpy as np
 import torch
 from genesis.options.renderers import BatchRenderer, Rasterizer, RendererOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import ErrorCode
+from genesis.engine.solvers.rigid.data import RigidErrorCode
 from genesis.utils.misc import qd_from_torch, qd_to_torch
 from genesis.typing import Vec2FType
 
@@ -64,6 +64,8 @@ from eden.options._metadata import OPTION_METADATA_KEYS
 from eden.types import VecEnvReset, VecEnvStep
 from eden.utils.configs import EdenConfig, EdenMimicConfig, EdenRLConfig
 from eden.utils.misc import (
+    assert_built,
+    assert_unbuilt,
     invert_segmentation_idx_dict,
     resolve_named_entity,
     sanitize_envs_idx,
@@ -113,9 +115,9 @@ _R = TypeVar("_R")
 #: pair, or a NaN gradient under ``requires_grad`` (a rollout too stiff to differentiate, which the message says how to
 #: shorten).
 _RECOVERABLE_SOLVER_ERRORS = (
-    ErrorCode.INVALID_CONTACT_NAN
-    | ErrorCode.INVALID_FORCE_NAN
-    | ErrorCode.INVALID_ACC_NAN
+    RigidErrorCode.INVALID_CONTACT_NAN
+    | RigidErrorCode.INVALID_FORCE_NAN
+    | RigidErrorCode.INVALID_ACC_NAN
     | MochiErrorCode.MOCHI_DIVERGED
 )
 
@@ -127,7 +129,7 @@ def _misconfiguration_errors(solver) -> int:
     reset without ever raising, so it is left to the reset like a corrupt state.
     """
     registered = 0
-    for code in _solver_errno_attribute(solver, "_error_messages"):
+    for code in _solver_errno_attribute(solver, "_error_reports"):
         registered |= int(code)
     return registered & ~_RECOVERABLE_SOLVER_ERRORS
 
@@ -715,21 +717,21 @@ class EnvBase(DrawDebugMixin, RBC, Generic[TConfig]):
 
         return env
 
-    @gs.assert_unbuilt
+    @assert_unbuilt
     def _setup_cameras(self):
         for camera_name in self.cameras_options.keys():
             camera_options: CameraOptions = getattr(self.cameras_options, camera_name)
             camera = Camera(env=self, options=camera_options, key=camera_name)
             self.cameras[camera_name] = camera
 
-    @gs.assert_unbuilt
+    @assert_unbuilt
     def _setup_sensors(self):
         for sensor_name in self.sensors_options.keys():
             sensor_options: SensorOptions = getattr(self.sensors_options, sensor_name)
             sensor = Sensor(env=self, options=sensor_options)
             self.sensors[sensor_name] = sensor
 
-    @gs.assert_unbuilt
+    @assert_unbuilt
     def register_pre_build_hook(self, hook: Callable[[], None]) -> None:
         self._pre_build_hooks.append(hook)
 
@@ -844,7 +846,7 @@ class EnvBase(DrawDebugMixin, RBC, Generic[TConfig]):
             for callback in self._substep_callbacks:
                 callback()
 
-    @gs.assert_unbuilt
+    @assert_unbuilt
     def build(
         self,
         env_spacing: Vec2FType | None = None,
@@ -877,7 +879,7 @@ class EnvBase(DrawDebugMixin, RBC, Generic[TConfig]):
         self.post_build_setup()
         self._verify_build()
 
-    @gs.assert_unbuilt
+    @assert_unbuilt
     def pre_build_setup(self):
         for entity in self.entities.values():
             entity.pre_build()
@@ -891,7 +893,7 @@ class EnvBase(DrawDebugMixin, RBC, Generic[TConfig]):
         for hook in self._pre_build_hooks:
             hook()
 
-    @gs.assert_built
+    @assert_built
     def post_build_setup(self):
         for entity in self.entities.values():
             entity.post_build()
@@ -912,7 +914,7 @@ class EnvBase(DrawDebugMixin, RBC, Generic[TConfig]):
         # NOTE: save the post setup state for reset
         self.reset_state = self.scene.get_state()
 
-    @gs.assert_built
+    @assert_built
     def _verify_build(self):
         if self.rigid_solver.n_equalities > 0:
             if self.env_options.sim_dt / self.env_options.sim_substeps > 0.004:
@@ -1006,7 +1008,7 @@ class EnvBase(DrawDebugMixin, RBC, Generic[TConfig]):
             "recorder_manager": lambda: RecorderManager(self, self.recorder_options),
         }
 
-    @gs.assert_built
+    @assert_built
     def _load_managers(self):
         """Construct every manager in :meth:`_manager_order`, then fire the STARTUP events.
 
@@ -1044,7 +1046,7 @@ class EnvBase(DrawDebugMixin, RBC, Generic[TConfig]):
         if _STARTUP in self.event_manager.available_modes:
             self.event_manager.compute(mode=_STARTUP)
 
-    @gs.assert_built
+    @assert_built
     def summary(self) -> str:
         """Return a human-readable summary of the environment and its managers."""
         msg = "Environment Summary:\n"
@@ -1945,7 +1947,7 @@ class RLEnvBase(EnvBase[EdenRLConfig]):
             "curriculum_manager": lambda: CurriculumManager(self, self.curriculum_options),
         }
 
-    @gs.assert_built
+    @assert_built
     def summary(self) -> str:
         """Return a human-readable summary, including RL managers (reward, termination, etc.)."""
         msg = super().summary()
@@ -2079,7 +2081,7 @@ class RLEnvBase(EnvBase[EdenRLConfig]):
             extras,
         )
 
-    @gs.assert_built
+    @assert_built
     def post_build_setup(self):
         super().post_build_setup()
         if self.env_options.cuda_graph_options is not None:
@@ -2250,7 +2252,7 @@ class MimicRLEnvBase(RLEnvBase, EnvBase[EdenMimicConfig]):
 
         self.motion_options = motion_options or MotionManagerOptions()
 
-    @gs.assert_built
+    @assert_built
     def _load_managers(self):
         from eden.managers.motion_manager import MotionManager
 
@@ -2260,7 +2262,7 @@ class MimicRLEnvBase(RLEnvBase, EnvBase[EdenMimicConfig]):
 
         super()._load_managers()
 
-    @gs.assert_built
+    @assert_built
     def summary(self) -> str:
         """Return a human-readable summary, including the motion manager."""
         msg = super().summary()

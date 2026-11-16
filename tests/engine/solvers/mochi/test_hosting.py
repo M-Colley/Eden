@@ -12,6 +12,8 @@ from genesis.engine.scene import SCENE_FORMAT
 
 from eden.engine.solvers.mochi import (
     MochiOptions,
+    MochiRigidSpec,
+    MochiSoftSpec,
     MochiSolver,
     add_mochi_entity,
     create_mochi_scene,
@@ -51,6 +53,28 @@ def test_an_installed_scene_hands_every_mochi_material_to_the_mochi_solver():
     assert not scene.sim.rigid_solver.entities
     # The solver took the scene's gravity, which SceneOptions hands only to the solvers it declares.
     np.testing.assert_allclose(solver._options.gravity, SIM_OPTIONS["gravity"])
+
+
+def test_a_mochi_spec_reaches_the_mochi_solver_and_a_genesis_spec_of_a_mochi_material_is_refused():
+    """The simulator dispatches a spec along the MRO of its class: a `MochiRigidSpec` is a `gs.entities.Rigid`, which
+    would otherwise reach the RigidSolver.
+    """
+    scene = _scene()
+    plane = scene.add_entity(spec=MochiRigidSpec(morph=gs.morphs.Plane()))
+    cube = scene.add_entity(
+        spec=MochiSoftSpec(
+            morph=gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.5)), material=mochi_materials.Elastic()
+        )
+    )
+    assert plane in scene.mochi_solver.entities and cube in scene.mochi_solver.soft_entities
+    assert cube.surface.vis_mode == "visual" and not scene.sim.rigid_solver.entities
+
+    with pytest.raises(gs.GenesisException, match="Pass a spec of `eden.engine.solvers.mochi.specs` instead"):
+        scene.add_entity(spec=gs.entities.Rigid(morph=gs.morphs.Plane(), material=mochi_materials.Rigid()))
+    with pytest.raises(gs.GenesisException, match="contact parameters of its bodies from their material"):
+        MochiRigidSpec(morph=gs.morphs.Plane()).select(gs.indices.Link.named("*"))
+    with pytest.raises(gs.GenesisException, match="never both"):
+        scene.add_entity(gs.morphs.Plane(), spec=MochiRigidSpec(morph=gs.morphs.Plane()))
 
 
 def test_a_mochi_entity_gets_the_surface_defaults_of_its_kind():
@@ -145,7 +169,9 @@ def test_the_rasterizer_draws_the_rigid_and_the_deformable_bodies():
 
 
 def test_a_reset_restores_a_scene_of_deformable_bodies_alone():
-    """``Simulator.reset`` skips a solver that holds no kinematic entity; the installed reset does not."""
+    """``Simulator.reset`` skips a solver whose ``data`` leaves state out (``is_checkpointable``), as the MochiSolver's
+    does; the installed reset restores it, deformable vertices included.
+    """
     scene = _scene()
     cube = scene.add_entity(
         gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.5)), material=mochi_materials.Elastic(E=1e5)
@@ -158,6 +184,30 @@ def test_a_reset_restores_a_scene_of_deformable_bodies_alone():
 
     scene.reset()
     torch.testing.assert_close(cube.get_state().pos, start, rtol=0.0, atol=0.0)
+
+
+def test_a_saved_state_restores_the_mochi_bodies_of_the_environments_it_is_given():
+    """The scene's state holds the MochiSolver's, which `Simulator.get_state` leaves out (it is not checkpointable)."""
+    scene = _scene()
+    scene.add_entity(gs.morphs.Plane(), material=mochi_materials.Rigid())
+    box = scene.add_entity(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.5)), material=mochi_materials.Rigid())
+    scene.build(n_envs=2)
+    for _ in range(3):
+        scene.step()
+    state = scene.get_state()
+    assert type(scene.mochi_solver).__name__ in state.solvers
+    saved = box.get_pos().clone()
+    for _ in range(5):
+        scene.step()
+    moved = box.get_pos().clone()
+    assert float((moved - saved).abs().max()) > 1e-4
+
+    scene.reset(state, envs_idx=[1])
+    torch.testing.assert_close(box.get_pos(), torch.stack((moved[0], saved[1])), rtol=0.0, atol=0.0)
+
+    state.solvers.pop(type(scene.mochi_solver).__name__)
+    with pytest.raises(gs.GenesisException, match="holds no state of the MochiSolver"):
+        scene.reset(state)
 
 
 def test_an_error_raises_at_the_next_check_unless_its_environment_is_reset():
@@ -197,7 +247,9 @@ def test_an_error_raises_at_the_next_check_unless_its_environment_is_reset():
 
 
 def test_the_arrays_of_the_solver_are_freed_with_its_scene():
-    """``Simulator.destroy`` frees the arrays of the solvers whose ``data`` it can list, which this solver refuses."""
+    """``Simulator.destroy`` frees the arrays of the solvers whose ``data`` it can list, which this solver refuses: its
+    own ``destroy`` frees them.
+    """
     if not gs.use_ndarray:
         pytest.skip("only ndarrays are freed with their scene; fields go with `qd.reset`")
     scene = _scene()
@@ -220,4 +272,4 @@ def test_the_arrays_of_the_solver_are_freed_with_its_scene():
 
     scene.destroy()
     assert all(array._unwrap().arr is None for array in arrays)
-    solver.destroy_arrays()  # an array already freed is left alone
+    solver.destroy()  # an array already freed is left alone

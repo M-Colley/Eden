@@ -24,6 +24,8 @@ from eden.options import (
 )
 from eden.options.splat import NyxSplatOptions
 
+from eden.utils.misc import assert_unbuilt
+
 if TYPE_CHECKING:
     from gs_nyx_plugin.nyx_camera_options import NyxCameraOptions
 
@@ -204,7 +206,7 @@ class NyxSplatEnvBase(EnvBase[EdenNyxSplatConfig]):
             **kwargs,
         )
 
-    @gs.assert_unbuilt
+    @assert_unbuilt
     def _setup_cameras(self):
         from gs_nyx_plugin.nyx_camera_options import NyxCameraOptions
 

@@ -132,6 +132,30 @@ def test_the_published_metadata_holds_no_direct_reference():
     assert direct == set()
 
 
+def test_the_genesis_source_init_names_is_the_one_a_checkout_installs():
+    """`eden.init` names `GENESIS_SOURCE` when the installed genesis-world predates Eden's; a checkout's `uv sync`
+    installs `[tool.uv.sources]`. Both go together once a genesis-world release holds the commit.
+    """
+    from eden.utils.distribution import GENESIS_SOURCE
+
+    pyproject = _load_pyproject()
+    source = pyproject.get("tool", {}).get("uv", {}).get("sources", {}).get("genesis-world")
+    assert GENESIS_SOURCE == (None if source is None else source["url"])
+    # The commit the source names still calls itself the release the requirement pins (see pyproject.toml), which is
+    # what lets uv substitute it: a moved pin and a stale requirement would fail to resolve.
+    (genesis,) = (req for req in _published_requirements() if req.name == "genesis-world")
+    assert str(genesis.specifier).startswith("==")
+    # The docs that tell a pip user which Genesis to install name the same source
+    written = {
+        (path.relative_to(REPO_ROOT).as_posix(), url)
+        for path in _doc_sources()
+        for url in re.findall(
+            r"https://github\.com/Genesis-Embodied-AI/genesis-world/archive/[^\s\"'`)]+", path.read_text()
+        )
+    }
+    assert {url for _, url in written} <= {GENESIS_SOURCE}, sorted(written)
+
+
 def test_each_unpublished_requirement_is_the_pin_its_extras_git_group_installs():
     """The install command printed outside a checkout and the group a checkout syncs must name the same commit."""
     from eden.utils.distribution import UNPUBLISHED_REQUIREMENTS

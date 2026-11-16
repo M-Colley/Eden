@@ -37,7 +37,7 @@ import eden as en
 from eden.utils.contacts import aggregate_grouped_contacts, resolve_local_link_idx
 from eden.entities.base import Entity
 from eden.entities.dofs_default_mixin import DofDefaultsMixin
-from eden.entities.support_mixin import SupportSurfaceMixin
+from eden.entities.support_mixin import SupportSurfaceMixin, _kernel_broad_phase
 from eden.options.actuators import ActuatorSpecOptions
 from eden.options.entities import RESOLVED_DOF_TENSOR_FIELD_NAMES, RIGID_CONSTRAINT_FIELD_NAMES
 from eden.utils.misc import (
@@ -45,6 +45,8 @@ from eden.utils.misc import (
     DofRuns,
     as_genesis_control_index,
     as_genesis_index,
+    assert_built,
+    assert_unbuilt,
     env_indices,
     is_env_mask,
     sanitize_envs_idx,
@@ -632,7 +634,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
     # ----------------------------------- post_build -------------------------------------
     # ------------------------------------------------------------------------------------
 
-    @gs.assert_built
+    @assert_built
     def _parse_dofs_info(
         self,
         dofs_info: dict[str, float | Vec2FType],
@@ -650,7 +652,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
 
         return info.to(self.device)
 
-    @gs.assert_built
+    @assert_built
     def _init_dofs_property(
         self,
         attr_name: str,
@@ -991,7 +993,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         """
         return self._env.rigid_solver._integrator == gs.integrator.Euler
 
-    @gs.assert_built
+    @assert_built
     def post_build(self) -> None:
         # First: every step below branches on ``is_fixed_base``, so a declaration the asset
         # contradicts must stop the build before any of them runs on the wrong branch.
@@ -1718,7 +1720,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
     # ------------------------------------ attach ----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    @gs.assert_unbuilt
+    @assert_unbuilt
     def attach_to(
         self,
         entity: Entity,
@@ -1907,7 +1909,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
     # ------------------------------- find named indices ---------------------------------
     # ------------------------------------------------------------------------------------
 
-    @gs.assert_built
+    @assert_built
     def find_named_dofs_idx_local(
         self,
         dofs_name: list[str] | str,
@@ -1956,7 +1958,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
 
         return res_dofs_name, res_dofs_idx
 
-    @gs.assert_built
+    @assert_built
     def find_free_base_dofs_idx_local(self, joint_name: str | None = None) -> list[int]:
         """Find the six local DOF indices of the floating base's free joint.
 
@@ -1998,7 +2000,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
             f"Pass None to auto-detect the free base joint by type."
         )
 
-    @gs.assert_built
+    @assert_built
     def find_named_links_idx_local(
         self,
         links_name: list[str] | str,
@@ -3780,12 +3782,9 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         ``collider_config``, ``_errno``). Isolated here so a Genesis collider refactor breaks
         this one named method rather than the body of :meth:`place_on_to`. The argument list
         mirrors the ``func_broad_phase`` call in Genesis' ``func_detection``; the kernel that wraps it
-        lives in :func:`eden.entities.support_mixin._broad_phase_kernel`.
+        lives in :func:`eden.entities.support_mixin._kernel_broad_phase`.
         """
-        from eden.entities.support_mixin import _broad_phase_kernel
-
-        _broad_phase_kernel()(
-            self.solver.geoms_init_AABB,
+        _kernel_broad_phase(
             self.solver.dyn_state,
             self.solver.collider.collider_state,
             self.solver.constraint_solver.constraint_state,
@@ -3833,7 +3832,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         entity._kernel_update_aabbs(
             self.solver.dyn_state.geoms.pos,
             self.solver.dyn_state.geoms.quat,
-            self.solver.geoms_init_AABB,
+            self.solver.rigid_info.geoms_init_AABB,
             self.solver.dyn_state.geoms.aabb_min,
             self.solver.dyn_state.geoms.aabb_max,
         )

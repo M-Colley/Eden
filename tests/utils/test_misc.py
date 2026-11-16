@@ -565,6 +565,27 @@ def test_a_git_install_records_the_commit_it_was_installed_from(tmp_path, monkey
     assert get_package_provenance(name) == {"version": "1.2.3", "commit": _SHA}
 
 
+@pytest.mark.parametrize(
+    ("url", "commit"),
+    [
+        (f"https://github.com/x/y/archive/{_SHA}.tar.gz", _SHA),
+        (f"https://github.com/x/y/archive/{_SHA}.zip", _SHA),
+        # A branch or a tag names no fixed commit, and a short hash is ambiguous
+        ("https://github.com/x/y/archive/refs/heads/main.tar.gz", None),
+        ("https://github.com/x/y/archive/v1.4.6.tar.gz", None),
+        (f"https://github.com/x/y/archive/{_SHA[:7]}.tar.gz", None),
+        (f"https://example.com/x/y/archive/{_SHA}.tar.gz", None),
+    ],
+    ids=["tar", "zip", "branch", "tag", "short", "not-github"],
+)
+def test_an_install_from_a_github_commit_archive_records_that_commit(tmp_path, monkeypatch, url, commit):
+    """How a uv checkout pins Genesis between its releases (pyproject.toml's ``[tool.uv.sources]``): the version alone
+    would read as the release the commit came after.
+    """
+    name = _installed(monkeypatch, tmp_path, {"url": url, "archive_info": {}})
+    assert get_package_provenance(name) == {"version": "1.2.3", "commit": commit}
+
+
 def test_an_editable_install_records_its_checkouts_head_or_none_outside_a_repository(tmp_path, monkeypatch):
     checkout = tmp_path / "checkout"
     checkout.mkdir()

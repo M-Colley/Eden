@@ -19,7 +19,7 @@ import genesis as gs
 import pytest
 import torch
 from torch.overrides import TorchFunctionMode
-from genesis.utils.array_class import ErrorCode
+from genesis.engine.solvers.rigid.data import RigidErrorCode
 from torch.utils._device import _device_constructors
 
 import eden
@@ -1655,7 +1655,7 @@ def decimated_box_env():
     )
 
 
-def _corrupt_env_1_in_sim_step(env, sim_step: int, code: int = ErrorCode.INVALID_CONTACT_NAN):
+def _corrupt_env_1_in_sim_step(env, sim_step: int, code: int = RigidErrorCode.INVALID_CONTACT_NAN):
     """Register a callback writing, in the given sim step, the flags a rigid kernel sets in env 1's errno (by default
     those of a NaN contact force).
     """
@@ -1714,9 +1714,15 @@ def test_a_solver_error_no_reset_clears_raises_at_the_next_control_step():
 @pytest.mark.parametrize(
     ("code", "message"),
     [
-        (ErrorCode.OVERFLOW_CONTACTS, "Exceeding max number of post-pruning contact points"),
-        (ErrorCode.OVERFLOW_CONTACTS | ErrorCode.INVALID_CONTACT_NAN, "Exceeding max number of post-pruning contact"),
-        (ErrorCode.UNSUPPORTED_COLLISION_PAIR, "Collision between a non-convex geom and a terrain is not supported"),
+        (RigidErrorCode.OVERFLOW_CONTACTS, "Exceeding max number of post-pruning contact points"),
+        (
+            RigidErrorCode.OVERFLOW_CONTACTS | RigidErrorCode.INVALID_CONTACT_NAN,
+            "Exceeding max number of post-pruning contact",
+        ),
+        (
+            RigidErrorCode.UNSUPPORTED_COLLISION_PAIR,
+            "Collision between a non-convex geom and a terrain is not supported",
+        ),
     ],
     ids=["overflow", "overflow-and-nan", "unsupported-pair"],
 )
@@ -1754,7 +1760,7 @@ def test_a_misconfiguration_a_substep_callback_clears_raises_at_the_next_control
             scene_options=SceneOptions(box=BoxOptions(size=(0.1, 0.1, 0.1), default_root_pos=(0.0, 0.0, 0.5))),
         )
     )
-    _corrupt_env_1_in_sim_step(env, 0, ErrorCode.OVERFLOW_CONTACTS)
+    _corrupt_env_1_in_sim_step(env, 0, RigidErrorCode.OVERFLOW_CONTACTS)
     env_1 = torch.tensor([1], device=env.device)
     calls = []
 

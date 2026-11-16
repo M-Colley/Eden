@@ -23,7 +23,6 @@ from genesis.engine.solvers.rigid.abd.accessor import (
     kernel_control_dofs_position,
     kernel_control_dofs_position_velocity,
     kernel_control_dofs_velocity,
-    kernel_get_kinematic_state,
     kernel_set_dofs_armature,
     kernel_set_dofs_damping,
     kernel_set_dofs_kp,
@@ -39,13 +38,15 @@ from genesis.engine.solvers.rigid.abd.misc import (
     kernel_init_vert_fields,
 )
 from genesis.options.morphs import Morph
-from genesis.utils import array_class
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
+from genesis.utils.sdf import SDFInfo
 from genesis.utils.data import namespace, opt_in
 from genesis.utils.misc import get_gpu_shared_tile_sizes, qd_destroy_data, qd_to_numpy, qd_to_torch, tensor_to_array
 from genesis.utils.sdf import SDF
 
 from eden.engine._surface import require_members
 from eden.engine.solvers.mochi import materials as mochi_materials
+from eden.engine.solvers.mochi import specs as mochi_specs
 from eden.engine.solvers.mochi.articulated import (
     kernel_assemble_joints,
     kernel_project_links_residual,
@@ -79,7 +80,7 @@ from eden.engine.solvers.mochi.data import (
     MochiCollisionData,
     MochiInfo,
     MochiState,
-    MochiStaticConfig,
+    MochiConfig,
     get_mochi_contact_state,
     get_mochi_hit_readback,
     get_mochi_info,
@@ -102,7 +103,14 @@ from eden.engine.solvers.mochi.integration import (
     kernel_store_stage_start_poses,
 )
 from eden.engine.solvers.mochi.islands import kernel_build_islands, kernel_cholesky_solve_islands
-from eden.engine.solvers.mochi.kinematics import kernel_update_geom_aabbs, kernel_update_geoms, kernel_update_kinematics
+from eden.engine.solvers.mochi.kinematics import (
+    kernel_get_kinematic_state,
+    kernel_set_kinematic_state,
+    kernel_update_geom_aabbs,
+    kernel_update_geoms,
+    kernel_update_kinematics,
+    kernel_update_vgeoms,
+)
 from eden.engine.solvers.mochi.linear_solver import (
     kernel_condense_dense,
     kernel_pcg_any_active,
@@ -188,8 +196,11 @@ from eden.engine.solvers.mochi.step_monolith import kernel_step_monolith
 from eden.engine.solvers.mochi.tet_tree import build_tet_tree
 
 if TYPE_CHECKING:
-    from genesis.engine.scene import Scene
+    from genesis.engine.entities.base_entity import EntityDescription
+    from genesis.engine.entities.rigid_entity import RigidGeom
+    from genesis.engine.entities.rigid_entity.rigid_equality import RigidEquality
     from genesis.engine.simulator import Simulator
+    from genesis.options.surfaces import Surface
 
 # Conjugate gradient iterations between two host-side checks of the per-environment convergence flags.
 PCG_CHECK_PERIOD = 8
@@ -215,25 +226,25 @@ _AUTO_COLLIDER_TYPE_BY_GEOM_TYPE = {
 
 
 # The KinematicSolver members this solver overrides or relies on beyond its imports (see eden.engine._surface), and
-# the fields of the kinematic tree `_create_data_manager` puts the collision arrays in: written through
-# `object.__setattr__`, a renamed one would only add an attribute no kernel reads.
+# the fields of the kinematic tree `_create_data_manager` puts the collision arrays and the geom rest boxes in: written
+# through `object.__setattr__`, a renamed one would only add an attribute no kernel reads.
 require_members(
     __name__,
     {
-        array_class.DynInfo: ("edges", "faces", "geoms", "verts"),
-        array_class.DynState: ("fixed_verts", "free_verts", "geoms"),
+        DynInfo: ("edges", "faces", "geoms", "verts"),
+        DynState: ("fixed_verts", "free_verts", "geoms"),
+        RigidInfo: ("geoms_init_AABB",),
         KinematicSolver: (
-            "_build_static_config",
+            "_build_config",
             "_create_data_manager",
             "_init_entity_fields",
             "_init_link_fields",
             "add_entity",
             "clear_errno",
+            "destroy",
             "register_errors",
             "set_dofs_position",
             "set_qpos",
-            "set_state",
-            "update_vgeoms",
         ),
     },
 )
@@ -306,13 +317,28 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     line search; contact is re-detected at every iterate.
     """
 
-    material_cls = mochi_materials.Base
+    # Both spec classes reach this solver once it is installed (see `eden.engine.solvers.mochi.hosting`); the simulator
+    # reads this one at its construction alone, before any MochiSolver exists.
+    entity_spec_cls = mochi_specs.MochiRigidSpec
     _entity_classes = ((Morph, MochiEntity),)
+    # Its state includes the deformable vertices, the integration history and the contact state, which its `data`
+    # leaves out (see `data` below): `Simulator.get_state` and `Simulator.reset` skip it, and the hosting saves and
+    # restores it through `get_state` and `set_state` instead.
+    is_checkpointable = False
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: MochiOptions) -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: MochiOptions) -> None:
+        super().__init__(sim, options)
         self._options: MochiOptions = options
-        self.sdf_info: array_class.SDFInfo | None = None
+        # The collision structure of the entities added so far, which `add_entity` keeps up to date as the RigidSolver
+        # does its own: the KinematicSolver tracks the links, joints and visual geoms alone.
+        self._geoms: list[RigidGeom] = gs.List()
+        self._equalities: list[RigidEquality] = gs.List()
+        self._n_verts = 0
+        self._n_free_verts = 0
+        self._n_fixed_verts = 0
+        self._n_faces = 0
+        self._n_edges = 0
+        self.sdf_info: SDFInfo | None = None
         self._is_contacts_recorded = False
         # Environments whose kinematic state was changed from outside the solver; their multistep history is rebuilt
         # at the start of the next step. Allocated at build, once the batch size is known.
@@ -335,15 +361,21 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     # ----------------------------------- add_entity -------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def add_entity(self, idx, material, morph, surface, visualize_contact=False, name=None, desc=None):
-        morphs = desc.morphs if desc is not None else ((morph,) if isinstance(morph, Morph) else tuple(morph))
-        if len(morphs) > 1:
-            gs.raise_exception("Heterogeneous morphs are not supported by the MochiSolver.")
-        if isinstance(morphs[0], (gs.morphs.Terrain, gs.morphs.USD, gs.morphs.Drone)):
-            gs.raise_exception(f"Morph {type(morphs[0]).__name__} is not supported by the MochiSolver.")
+    def add_entity(
+        self,
+        idx: int,
+        surface: "Surface",
+        spec: "mochi_specs.MochiRigidSpec | mochi_specs.MochiSoftSpec | None",
+        desc: "EntityDescription | None" = None,
+    ) -> "MochiEntity | MochiSoftEntity":
+        if desc is not None:
+            spec = desc.spec
+        morph = spec.morphs[0]
+        if isinstance(morph, (gs.morphs.Terrain, gs.morphs.USD, gs.morphs.Drone)):
+            gs.raise_exception(f"Morph {type(morph).__name__} is not supported by the MochiSolver.")
 
-        if isinstance(material, (mochi_materials.Elastic, mochi_materials.Shell, mochi_materials.Rod)):
-            is_rod = isinstance(material, mochi_materials.Rod)
+        if isinstance(spec, mochi_specs.MochiSoftSpec):
+            is_rod = isinstance(spec.material, mochi_materials.Rod)
             if not is_rod and not isinstance(
                 morph, (gs.morphs.Box, gs.morphs.Sphere, gs.morphs.Cylinder, gs.morphs.Mesh)
             ):
@@ -357,22 +389,41 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     "(eden.engine.solvers.mochi.morphs)."
                 )
             entity = MochiSoftEntity(
-                scene=self._scene,
+                scene=self._sim.scene,
                 solver=self,
-                material=material,
-                morph=morph,
                 surface=surface,
+                spec=spec,
                 idx=idx,
                 idx_in_solver=self.n_soft_entities,
                 v_start=self.n_soft_verts,
                 vvert_start=self.n_soft_vverts,
                 vface_start=self.n_soft_vfaces,
-                name=name,
             )
             self._soft_entities.append(entity)
             return entity
 
-        return super().add_entity(idx, material, morph, surface, visualize_contact, name, desc)
+        if not isinstance(spec, mochi_specs.MochiRigidSpec):
+            gs.raise_exception(
+                "The MochiSolver simulates the entities of `MochiRigidSpec` and `MochiSoftSpec` "
+                f"(eden.engine.solvers.mochi.specs), got {type(spec).__name__}."
+            )
+        entity = super().add_entity(idx, surface, spec, desc)
+        # As `RigidSolver.add_entity` does
+        self._geoms.extend(entity.geoms)
+        self._equalities.extend(entity.equalities)
+        self._n_verts += entity.n_verts
+        self._n_faces += entity.n_faces
+        self._n_edges += entity.n_edges
+        # The vertices of a link the world carries are stored once for every environment (see 'batch_fixed_verts').
+        # The entity comes last, so its vertices end both pools, wherever an attachment restored above moved them.
+        n_free_verts, n_fixed_verts = entity._free_verts_state_start, entity._fixed_verts_state_start
+        for link in entity.links:
+            if link.is_fixed and not entity._batch_fixed_verts:
+                n_fixed_verts += link.n_verts
+            else:
+                n_free_verts += link.n_verts
+        self._n_free_verts, self._n_fixed_verts = n_free_verts, n_fixed_verts
+        return entity
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ build -----------------------------------------
@@ -383,8 +434,8 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         """Number of rigid-deformable vertex attachments registered on the deformable entities."""
         return sum(len(att["verts_idx"]) for entity in self._soft_entities for att in entity.attachments)
 
-    def _build_static_config(self):
-        super()._build_static_config()
+    def _build_config(self):
+        super()._build_config()
         # The kinematic kernels run at the level this solver resolves, which may exceed the scene's (see below). Static
         # configs are immutable, since kernels key their compiled instances on them, so the config is rebuilt.
         self.rigid_config = type(self.rigid_config)(
@@ -396,10 +447,24 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # run in parallel even at one environment. The scene-global level and the other solvers are unaffected: this
         # solver builds its own static configs.
         if gs.backend == gs.cpu and cpu_threads_effective() > 1:
-            return max(self.sim._para_level, gs.PARA_LEVEL.PARTIAL)
-        return self.sim._para_level
+            return max(self.sim.para_level, gs.PARA_LEVEL.PARTIAL)
+        return self.sim.para_level
 
-    def build(self):
+    def build(self, n_envs: int) -> None:
+        # A link the world carries holds None where its asset states nothing, which the RigidSolver zeroes as it builds
+        # (see 'RigidLinkDescription'): the solver stores a value for every link, and such a link never moves.
+        for link in self.links:
+            if link.is_fixed:
+                desc = link.desc
+                if desc.mass is None:
+                    desc.mass = 0.0
+                if desc.inertial_pos is None:
+                    desc.inertial_pos = gu.zero_pos()
+                if desc.inertial_quat is None:
+                    desc.inertial_quat = gu.identity_quat()
+                if desc.inertia is None:
+                    desc.inertia = np.zeros((3, 3), dtype=gs.np_float)
+
         if self.is_active:
             other_solvers = [
                 solver
@@ -414,14 +479,6 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if self.sim.requires_grad:
                 gs.raise_exception("MochiSolver does not support differentiable simulation.")
 
-        self._n_geoms = self.n_geoms
-        self._n_verts = self.n_verts
-        self._n_free_verts = self.n_free_verts
-        self._n_fixed_verts = self.n_fixed_verts
-        self._n_faces = self.n_faces
-        self._n_edges = self.n_edges
-        self._geoms = self.geoms
-
         self.n_geoms_ = max(1, self.n_geoms)
         self.n_verts_ = max(1, self.n_verts)
         self.n_faces_ = max(1, self.n_faces)
@@ -429,9 +486,9 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.n_free_verts_ = max(1, self.n_free_verts)
         self.n_fixed_verts_ = max(1, self.n_fixed_verts)
 
-        super().build()
+        super().build(n_envs)
         self._init_default_armature()
-        self._external_state_dirty_mask = np.zeros((self._B,), dtype=bool)
+        self._external_state_dirty_mask = np.zeros((self.n_envs_,), dtype=bool)
         # Which of the two linear arms have environments to solve; refreshed at every substep by _select_linear_arms.
         self._has_dense_envs = False
         self._has_pcg_envs = False
@@ -458,26 +515,25 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         self._init_vert_fields()
         self._init_geom_fields()
-        kernel_update_geoms(
-            self._scene._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, True
-        )
+        kernel_update_geoms(self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, True)
         self._init_mochi()
-        # The base solver latches these flags at the end of each step and raises them at the start of the next, and a
-        # setter of the state of some envs clears theirs (see Solver.register_errors)
+        # The base solver latches these flags at the end of each step and raises them at the start of the next, with the
+        # message the report of the first one returns, and a setter of the state of some envs clears theirs (see
+        # ErrnoMixin.register_errors)
         self.register_errors(
             self.data_manager.errno,
             {
-                MochiErrorCode.OVERFLOW_MOCHI_CONTACT_PAIRS: (
+                MochiErrorCode.OVERFLOW_MOCHI_CONTACT_PAIRS: lambda: (
                     f"Exceeding max number of contact pairs ({self._max_pairs}). Please increase the value of "
                     "MochiSolver's option 'max_contact_pairs_per_env'."
                 ),
-                MochiErrorCode.OVERFLOW_MOCHI_CONTACTS: (
+                MochiErrorCode.OVERFLOW_MOCHI_CONTACTS: lambda: (
                     "Exceeding the capacity of a contact list: increase MochiSolver's option "
                     "'max_soft_hits_per_sample', 'max_deformable_collider_hits_per_query' or "
                     "'max_point_cloud_hits_per_query' (see `get_contact_capacity_usage()`). With "
                     "record_contacts=True the rigid contact record (2 slots per sample, not configurable) can fill too."
                 ),
-                MochiErrorCode.MOCHI_DIVERGED: (
+                MochiErrorCode.MOCHI_DIVERGED: lambda: (
                     "MochiSolver diverged: the residual of the implicit solve blew up. Reduce the time step or the "
                     "contact stiffness, or increase 'n_newton_iterations'."
                 ),
@@ -504,18 +560,23 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._init_sdf()
         self.subscribe(self._external_state_subscriber)
         kernel_reset_history(
-            self._scene._envs_idx, self.dyn_state, self.dyn_info, self.mochi_info, self.mochi_state, self.rigid_config
+            self._envs_idx, self.dyn_state, self.dyn_info, self.mochi_info, self.mochi_state, self.rigid_config
         )
         self._forward_kinematics()
+        # The base solver built the entities of the kinematic tree; the deformable ones read the arrays of `_init_soft`
+        for entity in self._soft_entities:
+            entity._build()
 
     def _create_data_manager(self):
         super()._create_data_manager()
-        # The kinematic data manager leaves the collision geoms and vertices as 0-d placeholders; the contact model
-        # needs the real ones (see MochiCollisionData). The structs are frozen dataclasses, which `Data` itself fills
-        # through `object.__setattr__`.
+        # The kinematic data manager leaves the collision geoms and vertices, and the rest boxes of the geoms, as 0-d
+        # placeholders; the contact model needs the real ones (see MochiCollisionData), and Genesis' geom kernels read
+        # and write `rigid_info.geoms_init_AABB`. The structs are frozen dataclasses, which `Data` itself fills through
+        # `object.__setattr__`.
+        self.geoms_init_AABB = V_VEC(3, dtype=gs.qd_float, shape=(self.n_geoms_, 8))
         collision = MochiCollisionData(
             sizes=dict(
-                envs=self._B,
+                envs=self.n_envs_,
                 geoms=self.n_geoms_,
                 verts=self.n_verts_,
                 faces=self.n_faces_,
@@ -532,9 +593,9 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             (self.dyn_state, "geoms", collision.geoms_state),
             (self.dyn_state, "free_verts", collision.free_verts_state),
             (self.dyn_state, "fixed_verts", collision.fixed_verts_state),
+            (self.rigid_info, "geoms_init_AABB", self.geoms_init_AABB),
         ):
             object.__setattr__(struct, name, array)
-        self.geoms_init_AABB = V_VEC(3, dtype=gs.qd_float, shape=(self.n_geoms_, 8))
 
     def _init_default_armature(self):
         """Fill in the default rotor inertia of the rotor joints whose armature the model leaves unset.
@@ -630,9 +691,9 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             np.array([geom.coup_restitution for geom in geoms], dtype=gs.np_float),
             np.array([geom.is_fixed for geom in geoms], dtype=gs.np_bool),
             np.zeros(self.n_geoms, dtype=gs.np_bool),
-            self.geoms_init_AABB,
             self.dyn_state,
             self.dyn_info,
+            self.rigid_info,
             self.rigid_config,
         )
 
@@ -799,7 +860,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self._n_pcg_iterations = min(max(1, self.n_dofs_total), 500)
 
         self._resolve_soft_collider_flags()
-        self.mochi_config = MochiStaticConfig(
+        self.mochi_config = MochiConfig(
             backend=gs.backend,
             para_level=self._resolve_para_level(),
             integrator=INTEGRATOR.BDF2 if options.integrator == "bdf2" else INTEGRATOR.BACKWARD_EULER,
@@ -837,7 +898,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.mochi_info = get_mochi_info(self)
         self._build_gravity(self.mochi_info.gravity)
         self.mochi_state = get_mochi_state(self, self._max_pairs, has_dense)
-        self.mochi_state.all_envs.from_numpy(np.arange(self._B, dtype=gs.np_int))
+        self.mochi_state.all_envs.from_numpy(np.arange(self.n_envs_, dtype=gs.np_int))
         self.contact_state = get_mochi_contact_state(self, self._max_pairs)
         self.eq_info = get_mochi_equalities_info(self, self._equalities)
         self.eq_state = get_mochi_equalities_state(self, len(self._equalities))
@@ -881,7 +942,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         """Rest data, contact samples and material parameters of the deformable bodies."""
         options = self._options
         entities = self._soft_entities
-        _B = self._B
+        _B = self.n_envs_
 
         if self.has_soft:
             verts_rest = np.concatenate([entity.init_positions for entity in entities]).astype(gs.np_float)
@@ -1207,7 +1268,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self._rod_vverts_elem,
                 self._rod_vverts_offset,
             )
-        self._envs_offset = np.asarray(self._scene.envs_offset, dtype=gs.np_float).reshape((_B, 3))
+        self._envs_offset = np.asarray(self._sim.scene.envs_offset, dtype=gs.np_float).reshape((_B, 3))
         if self.n_attachments > 0:
             self._init_attachments(verts_rest)
 
@@ -1631,10 +1692,10 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # never read.
         with namespace("mochi"):
             if self._has_grid_colliders:
-                opt_in(array_class.SDFInfo)
+                opt_in(SDFInfo)
                 self.sdf_info = SDF(self).sdf_info
             else:
-                self.sdf_info = array_class.SDFInfo(sizes=dict(geoms=self.n_geoms, sdf_cells=0, sdf_coarse_cells=0))
+                self.sdf_info = SDFInfo(sizes=dict(geoms=self.n_geoms, sdf_cells=0, sdf_coarse_cells=0))
 
     def _compute_links_pair_enabled(self):
         """Link pair filter: layers, entity pairs, and never a link against itself or another link of its entity."""
@@ -1655,16 +1716,14 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         kinematic state is final (the Newton iterates never read them).
         """
         if with_velocity:
-            kernel_forward_kinematics(
-                self._scene._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-            )
+            kernel_forward_kinematics(self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
             kernel_update_geoms(
-                self._scene._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, False
+                self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, False
             )
             kernel_update_geom_aabbs(self.geoms_init_AABB, self.dyn_state, self.dyn_info, self.rigid_config)
         else:
             kernel_update_kinematics(
-                self._scene._envs_idx,
+                self._envs_idx,
                 self.geoms_init_AABB,
                 self.dyn_state,
                 self.dyn_info,
@@ -1673,7 +1732,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
 
     def _on_external_state_change(self, change, envs_idx):
-        self._mark_external_state_dirty(self._scene._sanitize_envs_idx(envs_idx))
+        self._mark_external_state_dirty(self._sim.sanitize_envs_idx(envs_idx))
 
     def _mark_external_state_dirty(self, envs_idx):
         """Record the environments whose state was set from outside the solver, from an already sanitized index."""
@@ -1685,9 +1744,9 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # environment leaves the trajectories of the others unchanged.
         if self._external_state_dirty_mask.any():
             envs_idx = (
-                self._scene._envs_idx
+                self._envs_idx
                 if self._external_state_dirty_mask.all()
-                else self._scene._sanitize_envs_idx(np.nonzero(self._external_state_dirty_mask)[0])
+                else self._sim.sanitize_envs_idx(np.nonzero(self._external_state_dirty_mask)[0])
             )
             kernel_reset_history(
                 envs_idx,
@@ -1739,7 +1798,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return "monolith"
         return "pipeline"
 
-    def substep_pre_coupling(self, f):
+    def substep_pre_coupling(self):
         if not self.is_active:
             return
         self._sync_external_state()
@@ -2293,15 +2352,19 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.mochi_info, self.mochi_state, self.island_state, self.rigid_config, True, self._errno
             )
 
-    def substep_post_coupling(self, f):
-        if self.is_active and self.n_dofs > 0:
+    def substep_post_coupling(self):
+        if not self.is_active:
+            return
+        if self.n_dofs > 0:
             kernel_record_dofs_control_force(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+        if self.n_vgeoms > 0:
+            kernel_update_vgeoms(self.dyn_state, self.dyn_info, self.rigid_config)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ render ----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def get_soft_state_render(self, f):
+    def get_soft_state_render(self):
         """Environment-offset render vertex positions of the deformable surfaces, shape (n_vverts, B), as (positions,
         None, None) (UVs and faces are read from the visual geoms).
         """
@@ -2335,7 +2398,11 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     # -------------------------------- state get/set -------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def get_state(self, f=None):
+    def get_state(self) -> MochiSolverState | None:
+        """The state the solver steps from, which `set_state` restores: the kinematic state of the tree, the
+        integration history and the deformable vertices (see `eden.engine.solvers.mochi.hosting`, which saves it with
+        the scene's).
+        """
         if not self.is_active:
             return None
         state = MochiSolverState(self, self.sim.cur_step_global)
@@ -2374,13 +2441,38 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
         return state
 
-    def set_state(self, f, state, envs_idx=None, *, partial: bool = False) -> None:
+    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
+    def _set_kinematic_state(self, state: MochiSolverState, envs_idx=None) -> None:
+        """Write the kinematic state of the tree back and bring its forward kinematics up to date.
+
+        A method of its own, tagged apart from `set_state`, so that the subscribers are notified when it returns, the
+        solver's own among them (`_on_external_state_change`), before `set_state` restores the integration history and
+        marks the environments in sync again. It takes the environments as the caller gave them, which the subscribers
+        receive and sanitize, as those of every other setter.
+        """
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
+        kernel_set_kinematic_state(
+            envs_idx,
+            state.qpos,
+            state.dofs_vel,
+            state.links_pos,
+            state.links_quat,
+            self.dyn_state,
+            self.rigid_info,
+            self.rigid_config,
+        )
+        kernel_forward_kinematics(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+        self._is_forward_pos_updated = True
+        self._is_forward_vel_updated = True
+
+    def set_state(self, state: MochiSolverState, envs_idx=None) -> None:
+        """Restore the state `get_state` returned, in the given environments (all of them if None)."""
         if not self.is_active:
             return
-        # The kinematic state is restored (and subscribers notified) by the base class; the integration history is
-        # restored on top, leaving nothing for the external-state sync of the next step to rebuild.
-        super().set_state(f, state, envs_idx, partial=False)
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        # The kinematic state first, then the integration history on top, leaving nothing for the external-state sync
+        # of the next step to rebuild.
+        self._set_kinematic_state(state, envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         _kernel_set_history(
             envs_idx,
             state.qpos_prev,
@@ -2395,9 +2487,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self.mochi_state,
             self.rigid_config,
         )
-        kernel_update_geoms(
-            self._scene._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, False
-        )
+        kernel_update_geoms(self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, False)
         kernel_update_geom_aabbs(self.geoms_init_AABB, self.dyn_state, self.dyn_info, self.rigid_config)
         if self.has_soft:
             kernel_soft_set_state(
@@ -2426,18 +2516,21 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     # A checkpoint or a trajectory frame is refused: the arrays of the kinematic tree leave out the deformable vertices,
     # the integration history and the contact state of the solver, so a scene restored from them would silently resume
-    # from another state. The base solver's `data` raises that, and `Simulator.destroy` skips a solver whose `data` is
-    # the base one, where it would otherwise gather the arrays to free from it.
+    # from another state. The base solver's `data` raises that, and `is_checkpointable` above keeps `Simulator.destroy`
+    # from gathering the arrays to free from it.
     data = Solver.data
 
-    def destroy_arrays(self) -> None:
-        """Free the ndarrays of the solver right away, as `Simulator.destroy` frees those of the other solvers.
+    def destroy(self) -> None:
+        """Destroy the entities, the deformable ones included, and free the ndarrays of the solver right away.
 
-        `Simulator.destroy` gathers the arrays to free from `data`, which this solver refuses, so the destroy of its
-        scene calls this instead, after it (see `eden.engine.solvers.mochi.hosting`). They are those its attributes
-        hold, alone or in the structs (dataclasses) and the containers they hold. One already freed — by an earlier
-        call, or by `Simulator.destroy` as the array of another solver — is left alone; a field is freed by `qd.reset`.
+        `Simulator.destroy` frees the arrays of the checkpointable systems alone, gathered from their `data`, which
+        this solver refuses. Those freed here are the ones its attributes hold, alone or in the structs (dataclasses)
+        and the containers they hold. One already freed — by an earlier call, or by `Simulator.destroy` as the array
+        of another solver — is left alone; a field is freed by `qd.reset`.
         """
+        super().destroy()
+        for entity in self._soft_entities:
+            entity._destroy()
         for array in _iter_ndarrays(vars(self).values(), set()):
             if array.arr is not None:
                 qd_destroy_data(array)
@@ -2467,15 +2560,15 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         per-environment count; shorter environments carry -1 indices and zeros in their unused slots.
         """
         self._record_contacts()
-        n_contacts = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
+        n_contacts = torch.zeros((self.n_envs_,), dtype=gs.tc_int, device=gs.device)
         kernel_count_contact_records(self.hit_readback, self.soft_state, n_contacts, self.rigid_config, self.has_soft)
         n_max = max(1, int(n_contacts.max()))
 
         def ints(*shape):
-            return torch.full((self._B, n_max, *shape), -1, dtype=gs.tc_int, device=gs.device)
+            return torch.full((self.n_envs_, n_max, *shape), -1, dtype=gs.tc_int, device=gs.device)
 
         def floats(*shape):
-            return torch.zeros((self._B, n_max, *shape), dtype=gs.tc_float, device=gs.device)
+            return torch.zeros((self.n_envs_, n_max, *shape), dtype=gs.tc_float, device=gs.device)
 
         contact_data = {
             "entity_a": ints(),
@@ -2538,7 +2631,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         -------
         (distances, gradients, is_valid) : tuple of arrays of shape (n_points,), (n_points, 3), (n_points,)
         """
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         points = torch.as_tensor(points_world, dtype=gs.tc_float, device=gs.device).reshape((-1, 3)).contiguous()
         distances = torch.zeros((points.shape[0],), dtype=gs.tc_float, device=gs.device)
         gradients = torch.zeros((points.shape[0], 3), dtype=gs.tc_float, device=gs.device)
@@ -2617,9 +2710,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_set_dofs_limit(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
         else:
             gs.raise_exception(f"Invalid `name` {name}.")
-        self._wake_nodes(
-            dofs_idx, self._dofs_node, envs_idx_ if self._options.batch_dofs_info else self._scene._envs_idx
-        )
+        self._wake_nodes(dofs_idx, self._dofs_node, envs_idx_ if self._options.batch_dofs_info else self._envs_idx)
 
     def set_dofs_kp(self, kp, dofs_idx=None, envs_idx=None):
         self._set_dofs_info([kp], dofs_idx, "kp", envs_idx)
@@ -2808,7 +2899,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             values = qd_to_numpy(field)
             values[geoms_idx] = value
             field.from_numpy(values)
-        self._wake_nodes(self._nodes_idx, self._nodes_idx, self._scene._envs_idx)
+        self._wake_nodes(self._nodes_idx, self._nodes_idx, self._envs_idx)
 
     @property
     def is_links_info_batched(self) -> bool:
@@ -2857,13 +2948,13 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         values = qd_to_numpy(self.mochi_info.links.has_gravity)
         values[links_idx] = has_gravity
         self.mochi_info.links.has_gravity.from_numpy(values)
-        self._wake_nodes(self._nodes_idx, self._nodes_idx, self._scene._envs_idx)
+        self._wake_nodes(self._nodes_idx, self._nodes_idx, self._envs_idx)
 
     def set_gravity(self, gravity, envs_idx=None):
         """Set the gravity acting on the bodies of this solver, in m/s^2, and wake the environments it reaches."""
         super().set_gravity(gravity, envs_idx)
         if self.mochi_config.use_sleeping:
-            self._wake_nodes(self._nodes_idx, self._nodes_idx, self._scene._sanitize_envs_idx(envs_idx))
+            self._wake_nodes(self._nodes_idx, self._nodes_idx, self._sim.sanitize_envs_idx(envs_idx))
 
     @mutates(StateChange.MODEL)
     def enable_layer_contact(self, layer_a: str, layer_b: str, is_enabled: bool = True):
@@ -2876,7 +2967,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self._compute_soft_links_pair_enabled(), self.soft_info, self.rigid_config
             )
             kernel_soft_set_pair_enabled(self._compute_soft_pair_enabled(), self.soft_info, self.rigid_config)
-        self._wake_nodes(self._nodes_idx, self._nodes_idx, self._scene._envs_idx)
+        self._wake_nodes(self._nodes_idx, self._nodes_idx, self._envs_idx)
 
     @mutates(StateChange.MODEL)
     def enable_entity_contact(self, entity_a, entity_b, is_enabled: bool = True):
@@ -2898,59 +2989,49 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self._compute_soft_links_pair_enabled(), self.soft_info, self.rigid_config
             )
             kernel_soft_set_pair_enabled(self._compute_soft_pair_enabled(), self.soft_info, self.rigid_config)
-        self._wake_nodes(self._nodes_idx, self._nodes_idx, self._scene._envs_idx)
+        self._wake_nodes(self._nodes_idx, self._nodes_idx, self._envs_idx)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
 
     @property
-    def n_geoms(self):
-        if self.is_built:
-            return self._n_geoms
-        return len(self.geoms)
+    def n_geoms(self) -> int:
+        return len(self._geoms)
 
     @property
-    def n_verts(self):
-        if self.is_built:
-            return self._n_verts
-        return sum(entity.n_verts for entity in self._entities)
+    def n_verts(self) -> int:
+        return self._n_verts
 
     @property
-    def n_free_verts(self):
-        if self.is_built:
-            return self._n_free_verts
-        return sum(link.n_verts if not link.is_fixed or link.entity._batch_fixed_verts else 0 for link in self.links)
+    def n_free_verts(self) -> int:
+        return self._n_free_verts
 
     @property
-    def n_fixed_verts(self):
-        if self.is_built:
-            return self._n_fixed_verts
-        return sum(link.n_verts if link.is_fixed and not link.entity._batch_fixed_verts else 0 for link in self.links)
+    def n_fixed_verts(self) -> int:
+        return self._n_fixed_verts
 
     @property
-    def n_faces(self):
-        if self.is_built:
-            return self._n_faces
-        return sum(entity.n_faces for entity in self._entities)
+    def n_faces(self) -> int:
+        return self._n_faces
 
     @property
-    def n_edges(self):
-        if self.is_built:
-            return self._n_edges
-        return sum(entity.n_edges for entity in self._entities)
+    def n_edges(self) -> int:
+        return self._n_edges
 
     @property
-    def n_equalities(self):
-        if self.is_built:
-            return len(self._equalities)
-        return sum(entity.n_equalities for entity in self._entities)
+    def n_equalities(self) -> int:
+        return len(self._equalities)
 
     @property
-    def equalities(self):
-        if self.is_built:
-            return self._equalities
-        return gs.List(equality for entity in self._entities for equality in entity.equalities)
+    def geoms(self) -> "gs.List[RigidGeom]":
+        """The collision geoms of the solver, as a copy."""
+        return gs.List(self._geoms)
+
+    @property
+    def equalities(self) -> "gs.List[RigidEquality]":
+        """The equality constraints of the solver, as a copy."""
+        return gs.List(self._equalities)
 
     @property
     def n_samples(self):
@@ -3012,13 +3093,13 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         return self.n_dofs + 3 * self.n_soft_verts + self.n_rod_elems
 
     def _soft_field_of_entity(self, entity, field, envs_idx):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         out = torch.empty((len(envs_idx), entity.n_vertices, 3), dtype=gs.tc_float, device=gs.device)
         kernel_soft_get_vertices_field(envs_idx, entity.v_start, out, field, self.rigid_config)
         return out[0] if self.n_envs == 0 else out
 
     def _soft_values_of_entity(self, entity, values, envs_idx):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         values = torch.as_tensor(values, dtype=gs.tc_float, device=gs.device)
         if values.ndim == 2:
             values = values[None].expand(len(envs_idx), -1, -1)
@@ -3069,7 +3150,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         return verts_idx.contiguous()
 
     def set_soft_vertices_fixed(self, entity, verts_idx, is_fixed, envs_idx=None):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         verts_idx = self._per_env_vertices(verts_idx, envs_idx)
         kernel_soft_set_vertices_fixed(
             envs_idx, verts_idx, entity.v_start, int(bool(is_fixed)), self.soft_state, self.rigid_config
@@ -3077,7 +3158,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._mark_external_state_dirty(envs_idx)
 
     def set_soft_vertices_target(self, entity, verts_idx, pos, envs_idx=None):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         is_shared = verts_idx.ndim == 1
         verts_idx = self._per_env_vertices(verts_idx, envs_idx)
         n_verts = verts_idx.shape[1]
@@ -3121,7 +3202,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         kernel_soft_set_entity_contact_params(
             entity.idx_in_solver, self._pc_hash_cell, np.array(values, dtype=gs.np_float), self.soft_info
         )
-        self._wake_nodes(self._nodes_idx, self._nodes_idx, self._scene._envs_idx)
+        self._wake_nodes(self._nodes_idx, self._nodes_idx, self._envs_idx)
         self._is_contacts_recorded = False
 
 
@@ -3187,9 +3268,9 @@ def _kernel_get_collider_distances(
     distances: qd.types.ndarray(),
     gradients: qd.types.ndarray(),
     is_valid: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    sdf_info: SDFInfo,
     mochi_info: MochiInfo,
     mochi_config: qd.template(),
 ):

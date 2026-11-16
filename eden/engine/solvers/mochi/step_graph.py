@@ -24,7 +24,8 @@ per-environment flags as in the pipeline.
 
 import genesis as gs
 import quadrants as qd
-from genesis.utils import array_class
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
+from genesis.utils.sdf import SDFInfo
 
 from eden.engine.solvers.mochi.articulated import func_update_conv_weights
 from eden.engine.solvers.mochi.contact import func_broadphase_pairs, func_conservative_bounds
@@ -197,11 +198,11 @@ def kernel_step_graph(
     newton_counter: qd.types.ndarray(),
     round_counter: qd.types.ndarray(),
     pcg_counter: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
-    geoms_init_AABB: array_class.GeomsInitAABB,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    geoms_init_AABB: qd.Tensor,
     mochi_info: MochiInfo,
     mochi_state: MochiState,
     contact_state: MochiContactState,

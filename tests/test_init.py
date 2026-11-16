@@ -484,3 +484,22 @@ def test_a_run_name_is_sanitized_into_the_middle_and_the_id_stays_last(frozen_no
     assert name == f"{frozen_now}-lr=3e-4-seed-0-arm-{en.get_run_id()}"  # separators and spaces become "-"
     assert en.get_run_timestamp() == frozen_now
     assert en._new_run_dirname("") == f"{frozen_now}-{en.get_run_id()}"
+
+
+def test_init_names_the_genesis_to_install_when_the_installed_one_predates_eden(monkeypatch):
+    """The unreleased commit Eden runs on calls itself 1.4.6, as the release does: the API tells them apart."""
+    import importlib.util
+
+    from eden.utils.distribution import GENESIS_SOURCE
+
+    find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a: None if name == "genesis.options.entities" else find_spec(name, *a),
+    )
+    with pytest.raises(ImportError, match="predates the Genesis API Eden is written for") as raised:
+        en._require_genesis_api()
+    assert "uv sync" in str(raised.value) and (GENESIS_SOURCE is None or GENESIS_SOURCE in str(raised.value))
+    monkeypatch.undo()
+    en._require_genesis_api()  # the installed one
