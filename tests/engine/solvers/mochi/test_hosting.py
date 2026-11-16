@@ -76,6 +76,11 @@ def test_a_mochi_spec_reaches_the_mochi_solver_and_a_genesis_spec_of_a_mochi_mat
         MochiRigidSpec(morph=gs.morphs.Plane()).select(gs.indices.Link.named("*"))
     with pytest.raises(gs.GenesisException, match="never both"):
         scene.add_entity(gs.morphs.Plane(), spec=MochiRigidSpec(morph=gs.morphs.Plane()))
+    # Heterogeneous entities are refused with the name of the Mochi spec, a sequence of one morph included
+    box = gs.morphs.Box(size=(0.1, 0.1, 0.1))
+    for morphs, material in (([box, box], mochi_materials.Rigid()), ([box], mochi_materials.Elastic())):
+        with pytest.raises(gs.GenesisException, match=r"pass Mochi(Rigid|Soft)Spec one morph, not a sequence of"):
+            scene.add_entity(morphs, material=material)
 
 
 def test_a_mochi_entity_gets_the_surface_defaults_of_its_kind():

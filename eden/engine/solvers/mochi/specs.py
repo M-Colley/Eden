@@ -18,6 +18,20 @@ from pydantic import Field, model_validator
 from eden.engine.solvers.mochi import materials as mochi_materials
 
 
+def _refuse_morph_sequence(cls: type, data: Any) -> Any:
+    """Refuse a sequence of morphs, a heterogeneous entity, which the MochiSolver does not simulate.
+
+    Ahead of Genesis' own check, whose message names the class as ``gs.entities.<name>``, which a Mochi spec is not.
+    """
+    morph = data.get("morph") if isinstance(data, dict) else None
+    if isinstance(morph, (tuple, list)):
+        gs.raise_exception(
+            f"The MochiSolver simulates no heterogeneous entity: pass {cls.__name__} one morph, not a sequence of "
+            f"{len(morph)}."
+        )
+    return data
+
+
 class MochiRigidSpec(gs.entities.Rigid):
     """Spec of a rigid or articulated body simulated by the MochiSolver.
 
@@ -37,13 +51,7 @@ class MochiRigidSpec(gs.entities.Rigid):
     @model_validator(mode="before")
     @classmethod
     def _check_one_morph(cls, data: Any) -> Any:
-        # Ahead of Genesis' check, whose message names the class as `gs.entities.MochiRigidSpec`
-        morph = data.get("morph") if isinstance(data, dict) else None
-        if isinstance(morph, (tuple, list)) and len(morph) > 1:
-            gs.raise_exception(
-                f"The MochiSolver simulates no heterogeneous entity: pass MochiRigidSpec one morph, got {len(morph)}."
-            )
-        return data
+        return _refuse_morph_sequence(cls, data)
 
     @model_validator(mode="after")
     def _check_visualize_contact(self) -> Self:
@@ -77,6 +85,11 @@ class MochiSoftSpec(gs.entities.Spec["MochiSoftEntity"]):
 
     material: mochi_materials.Elastic | mochi_materials.Shell | mochi_materials.Rod
 
+    @model_validator(mode="before")
+    @classmethod
+    def _check_one_morph(cls, data: Any) -> Any:
+        return _refuse_morph_sequence(cls, data)
+
     # Genesis checks that a material belongs to the solver of the spec through a table of its own solvers, which holds
     # none of the Mochi materials and would refuse them all. The field above admits only the MochiSolver's.
     @model_validator(mode="before")
@@ -105,5 +118,5 @@ def mochi_spec(
         # `MochiRigidSpec` refuses it with the reason
         fields["visualize_contact"] = visualize_contact
     if isinstance(morph, Iterable) and not isinstance(morph, Morph):
-        fields["morph"] = tuple(morph)
+        fields["morph"] = tuple(morph)  # refused by the spec, with the reason
     return spec_cls(**{field: value for field, value in fields.items() if value is not None})

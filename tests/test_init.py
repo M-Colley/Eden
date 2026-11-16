@@ -509,7 +509,15 @@ def test_import_eden_names_the_genesis_to_install_when_the_installed_one_predate
         en._require_genesis_api()
     assert "uv sync" in str(raised.value) and (GENESIS_SOURCE is None or GENESIS_SOURCE in str(raised.value))
     assert str(old) in str(raised.value)  # the Genesis it found, which may shadow the one installed
-    (old / "options" / "entities").mkdir()
-    en._require_genesis_api()  # an API that has entity specs, as a package
+    sourceless = old / "options" / "entities.pyc"
+    sourceless.touch()
+    en._require_genesis_api()
+    sourceless.unlink()
+    (old / "options" / "entities").mkdir()  # a package
+    en._require_genesis_api()
+    (old / "options" / "entities").rmdir()
+    # A Genesis read from an archive cannot be looked into without importing it: the import decides
+    old_spec.submodule_search_locations = [str(tmp_path / "genesis.zip" / "genesis")]
+    en._require_genesis_api()
     monkeypatch.undo()
     en._require_genesis_api()  # the installed one

@@ -305,6 +305,9 @@ the state every solver declares (Genesis' `DataKind.STATE`: coordinates, velocit
 as it stood then, startup events included. What Genesis holds as the model rather than the state (masses,
 friction ratios, gains, set by setters or INTERVAL events) is not reset: an INTERVAL friction randomization
 carries over a reset. RESET events re-randomize what they set, so randomize per episode with RESET mode.
+A Mochi scene's reset restores the MochiSolver's own state instead (coordinates, velocities, link poses, the
+integration history and the deformable vertices), which holds no control target or mode: those keep their last
+values until the next action sets them.
 
 ### Solver errors
 
