@@ -2,7 +2,7 @@
 
 from genesis.engine.solvers.base_solver import ERRNO_BITS, BackwardErrorCode
 
-from eden.engine.solvers.mochi.error_codes import RECOVERABLE_MOCHI_ERRORS, MochiErrorCode
+from eden.engine.solvers.mochi.error_codes import MochiErrorCode
 
 
 def test_each_mochi_error_owns_a_bit_of_the_errno_apart_from_the_backward_pass():
@@ -12,4 +12,3 @@ def test_each_mochi_error_owns_a_bit_of_the_errno_apart_from_the_backward_pass()
         assert code.bit_count() == 1 and int(code) < 1 << ERRNO_BITS, code
         assert not int(code) & int(BackwardErrorCode.INVALID_GRAD_NAN), code
     assert len({int(code) for code in MochiErrorCode}) == len(MochiErrorCode)
-    assert RECOVERABLE_MOCHI_ERRORS == MochiErrorCode.MOCHI_DIVERGED

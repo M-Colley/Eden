@@ -21,6 +21,7 @@ Common entry points:
 """
 
 import importlib
+import importlib.util
 import logging as _stdlib_logging
 import os
 import secrets
@@ -133,13 +134,16 @@ def _require_genesis_api() -> None:
     """Raise, naming the command that fixes it, when the installed genesis-world predates the API Eden is written for.
 
     Its version cannot tell: the unreleased commit Eden runs on still calls itself 1.4.6 (see
-    ``eden.utils.distribution.GENESIS_SOURCE``), as the release does. The entity specs (``genesis.options.entities``)
+    ``eden.utils.distribution.GENESIS_SOURCE``), as the release does. The entity specs (``genesis/options/entities.py``)
     are the most recent part of that API Eden reads, and the release lacks them; without this check, the first Eden
-    module to import a part it lacks fails with a bare ``ModuleNotFoundError``.
+    module to import a part it lacks fails with a bare ``ModuleNotFoundError``. Run at ``import eden``, which imports no
+    Genesis, so the package is located on disk rather than imported (``find_spec`` of a top-level name imports nothing).
+    A missing Genesis is left to the ``import genesis`` that then fails.
     """
-    import importlib.util
-
-    if importlib.util.find_spec("genesis.options.entities") is not None:
+    spec = importlib.util.find_spec("genesis")
+    if spec is None or not spec.submodule_search_locations:
+        return
+    if any(os.path.isfile(os.path.join(root, "options", "entities.py")) for root in spec.submodule_search_locations):
         return
     from eden.utils.distribution import GENESIS_SOURCE, installed_version
 
@@ -154,6 +158,9 @@ def _require_genesis_api() -> None:
         f"that pyproject.toml pins; otherwise run {install}. Pinning genesis-world back to the release it reports does "
         "not help: Eden no longer runs on it."
     )
+
+
+_require_genesis_api()
 
 
 def init(
@@ -247,8 +254,6 @@ def init(
     # that genuinely needs them, and `_isolate_gpu_for_ddp()` ran at module import, long before.
     import genesis as gs
     import torch
-
-    _require_genesis_api()
 
     from eden.utils import distributed
     from eden.utils.torch import configure_torch_backends

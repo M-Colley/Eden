@@ -1776,6 +1776,35 @@ def test_a_misconfiguration_a_substep_callback_clears_raises_at_the_next_control
         env.step()
 
 
+def test_each_class_of_error_codes_sorts_its_own_errors_and_an_unknown_class_is_never_reset_away():
+    """Every solver and the coupler number their errors from the same low bits in their own errno, so what a reset may
+    clear is decided per class of codes; a class Eden does not know keeps every error, which then raises.
+    """
+    from enum import auto
+
+    from genesis.engine.couplers.sap_coupler import SAPErrorCode
+    from genesis.engine.solvers.base_solver import BackwardErrorCode, ErrorCode
+
+    from eden.engine.solvers.mochi.error_codes import MochiErrorCode
+    from eden.envs.base import _misconfiguration_errors
+
+    class UnknownErrorCode(ErrorCode):
+        INVALID_STATE_NAN = auto()
+
+    def system(*codes):
+        return type("System", (), {"_error_reports": dict.fromkeys(codes, str)})()
+
+    rigid = system(
+        RigidErrorCode.OVERFLOW_CONTACTS, RigidErrorCode.INVALID_FORCE_NAN, BackwardErrorCode.INVALID_GRAD_NAN
+    )
+    assert _misconfiguration_errors(rigid) == RigidErrorCode.OVERFLOW_CONTACTS | BackwardErrorCode.INVALID_GRAD_NAN
+    mochi = system(MochiErrorCode.OVERFLOW_MOCHI_CONTACTS, MochiErrorCode.MOCHI_DIVERGED)
+    assert _misconfiguration_errors(mochi) == MochiErrorCode.OVERFLOW_MOCHI_CONTACTS
+    sap = system(SAPErrorCode.OVERFLOW_CONTACTS, SAPErrorCode.INVALID_SOLVE)
+    assert _misconfiguration_errors(sap) == SAPErrorCode.OVERFLOW_CONTACTS
+    assert _misconfiguration_errors(system(UnknownErrorCode.INVALID_STATE_NAN)) == UnknownErrorCode.INVALID_STATE_NAN
+
+
 def test_a_flag_no_solver_registered_is_reset_like_a_corrupt_state(decimated_box_env):
     """A bit without a message never raises, so carrying it past the reset would reset its env at every control step."""
     env = decimated_box_env

@@ -486,20 +486,29 @@ def test_a_run_name_is_sanitized_into_the_middle_and_the_id_stays_last(frozen_no
     assert en._new_run_dirname("") == f"{frozen_now}-{en.get_run_id()}"
 
 
-def test_init_names_the_genesis_to_install_when_the_installed_one_predates_eden(monkeypatch):
-    """The unreleased commit Eden runs on calls itself 1.4.6, as the release does: the API tells them apart."""
+def test_import_eden_names_the_genesis_to_install_when_the_installed_one_predates_eden(monkeypatch, tmp_path):
+    """The unreleased commit Eden runs on calls itself 1.4.6, as the release does: the API tells them apart. Checked at
+    `import eden`, ahead of the first module to import a part of the API the release lacks, without importing Genesis.
+    """
+    import importlib.machinery
     import importlib.util
 
     from eden.utils.distribution import GENESIS_SOURCE
 
+    old = tmp_path / "genesis"
+    (old / "options").mkdir(parents=True)  # a Genesis without `options/entities.py`
     find_spec = importlib.util.find_spec
-    monkeypatch.setattr(
-        importlib.util,
-        "find_spec",
-        lambda name, *a: None if name == "genesis.options.entities" else find_spec(name, *a),
-    )
+    old_spec = importlib.machinery.ModuleSpec("genesis", None, is_package=True)
+    old_spec.submodule_search_locations = [str(old)]
+
+    def find_old_genesis(name, *args):
+        return old_spec if name == "genesis" else find_spec(name, *args)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_old_genesis)
     with pytest.raises(ImportError, match="predates the Genesis API Eden is written for") as raised:
         en._require_genesis_api()
     assert "uv sync" in str(raised.value) and (GENESIS_SOURCE is None or GENESIS_SOURCE in str(raised.value))
+    (old / "options" / "entities.py").touch()
+    en._require_genesis_api()  # an API that has entity specs
     monkeypatch.undo()
     en._require_genesis_api()  # the installed one

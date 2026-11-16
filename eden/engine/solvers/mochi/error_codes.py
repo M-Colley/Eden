@@ -13,8 +13,3 @@ class MochiErrorCode(ErrorCode):
     OVERFLOW_MOCHI_CONTACT_PAIRS = auto()
     OVERFLOW_MOCHI_CONTACTS = auto()
     MOCHI_DIVERGED = auto()
-
-
-#: The flags that leave an environment's state corrupt but its scene sound, which a reset of the environment recovers
-#: (see ``eden.envs.base``): a diverged implicit solve. A contact capacity overflow is a misconfiguration.
-RECOVERABLE_MOCHI_ERRORS = MochiErrorCode.MOCHI_DIVERGED
